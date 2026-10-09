@@ -1,0 +1,1829 @@
+/* ==================== 1. MASTER DATA ==================== */
+const CHECKLIST = [
+  { id:"ITM-001", name:"Odometer / Jarak Tempuh", level:"Major", weight:5, rec:"Lakukan servis berkala sesuai anjuran km." },
+  { id:"ITM-002", name:"Indikator Bahan Bakar", level:"Minor", weight:3, rec:"Isi bahan bakar sebelum batas minimal E." },
+  { id:"ITM-003", name:"Selang Bahan Bakar", level:"Critical", weight:7, rec:"Ganti selang bahan bakar yang retak/bocor." },
+  { id:"ITM-004", name:"Ban Depan (Tekanan & Tapak)", level:"Critical", weight:10, rec:"Tambah tekanan angin atau ganti ban depan jika aus." },
+  { id:"ITM-005", name:"Ban Belakang (Tekanan & Tapak)", level:"Critical", weight:10, rec:"Periksa tekanan angin ban belakang dan batas kembangan." },
+  { id:"ITM-006", name:"Komstir / Steering Head", level:"Critical", weight:10, rec:"Setel ulang kekencangan komstir atau ganti bearing." },
+  { id:"ITM-007", name:"Rantai Roda & Gear", level:"Major", weight:8, rec:"Setel kekencangan rantai dan berikan pelumas." },
+  { id:"ITM-008", name:"Rem Depan (Cakram)", level:"Critical", weight:12, rec:"Ganti kampas rem depan atau kuras minyak rem." },
+  { id:"ITM-009", name:"Rem Belakang (Tromol)", level:"Critical", weight:10, rec:"Setel jarak main pedal atau ganti kampas rem tromol." },
+  { id:"ITM-010", name:"Oli Mesin (Volume & Warna)", level:"Critical", weight:12, rec:"Ganti oli mesin baru untuk mencegah gesekan kasar." },
+  { id:"ITM-011", name:"Lampu Rem (Stop Lamp)", level:"Critical", weight:8, rec:"Periksa saklar rem atau ganti bohlam lampu rem segera!" },
+  { id:"ITM-012", name:"Lampu Utama & Lampu Sein", level:"Major", weight:5, rec:"Perbaiki fitting atau ganti lampu yang putus." },
+  { id:"ITM-013", name:"Aki / Tegangan Baterai", level:"Major", weight:5, rec:"Lakukan charge aki atau ganti jika voltase di bawah 12.4V." }
+];
+const KEY = { USERS:"ajhi_users", CUST:"ajhi_customers", LOGS:"ajhi_logs", SESS:"ajhi_session", SETTINGS:"ajhi_settings" };
+const TOTAL_WEIGHT = CHECKLIST.reduce((a,i)=>a+i.weight,0);
+const DEFAULT_SETTINGS = { intervalDays: 30, leadDays: 2 };
+
+/* ==================== 2. STORE (localStorage) ==================== */
+const Store = {
+  raw(key, fallback){
+    try{
+      const v = localStorage.getItem(key);
+      if(v === null) return fallback;
+      return JSON.parse(v);
+    }catch(e){
+      console.warn("Storage korup:", key, e);
+      return fallback;
+    }
+  },
+  save(key, val){
+    try{ localStorage.setItem(key, JSON.stringify(val)); return true; }
+    catch(e){ toast("Gagal menyimpan data", "error"); return false; }
+  },
+  users(){ return this.raw(KEY.USERS, []) || []; },
+  customers(){ return this.raw(KEY.CUST, []) || []; },
+  logs(){ return this.raw(KEY.LOGS, []) || []; },
+  setUsers(v){ this.save(KEY.USERS, v); },
+  setCustomers(v){ this.save(KEY.CUST, v); },
+  setLogs(v){ this.save(KEY.LOGS, v); },
+  settings(){
+    const raw = this.raw(KEY.SETTINGS, null) || {};
+    return {
+      intervalDays: Number(raw.intervalDays) || DEFAULT_SETTINGS.intervalDays,
+      leadDays: Number(raw.leadDays) || DEFAULT_SETTINGS.leadDays
+    };
+  },
+  setSettings(v){ this.save(KEY.SETTINGS, v); return true; },
+  customer(id){ return this.customers().find(c=>c.id===id) || null; },
+  customerByToken(t){ return this.customers().find(c=>c.token===t) || null; },
+  user(id){ return this.users().find(u=>u.id===id) || null; },
+  log(id){ return this.logs().find(l=>l.id===id) || null; },
+  logsOf(cid){ return this.logs().filter(l=>l.customerId===cid).sort(sortDesc); },
+  nextId(prefix, arr){
+    let max = 0;
+    (arr||[]).forEach(x=>{
+      const m = String(x.id||"").match(/(\d+)$/);
+      if(m) max = Math.max(max, parseInt(m[1],10));
+    });
+    return prefix + String(max+1).padStart(3,"0");
+  },
+  resetDemo(){
+    [KEY.USERS, KEY.CUST, KEY.LOGS, KEY.SESS, KEY.SETTINGS].forEach(k=>localStorage.removeItem(k));
+    seed();
+  }
+};
+function sortDesc(a,b){
+  const da = (a.date||"") + "T" + (a.createdAt||"").slice(11,19);
+  const db = (b.date||"") + "T" + (b.createdAt||"").slice(11,19);
+  if(da === db) return String(b.createdAt||"").localeCompare(String(a.createdAt||""));
+  return db.localeCompare(da);
+}
+
+/* ==================== 3. ENGINE (Kalkulasi AJHI) ==================== */
+const Engine = {
+  compute(items){
+    let earned = 0, total = 0;
+    const criticals = [], warns = [], recs = [];
+    CHECKLIST.forEach(it=>{
+      total += it.weight;
+      const f = parseFloat(items[it.id]);
+      const factor = isNaN(f) ? 1 : f;
+      earned += it.weight * factor;
+      if(factor === 0){
+        if(it.level === "Critical") criticals.push(it.name);
+        recs.push(it.rec);
+      }else if(factor === 0.5){
+        warns.push(it.name);
+        recs.push(it.rec);
+      }
+    });
+    const score = Math.round((earned/total)*100);
+    let risk = "🟢 NORMAL", status = "Sehat / Optimal";
+    if(criticals.length > 0){
+      risk = "🔴 PRIORITAS KESELAMATAN";
+      status = "PERLU PERBAIKAN SEGERA";
+    }else if(score < 75 || warns.length > 2){
+      risk = "🟡 PERHATIAN";
+      status = "Perlu Perawatan Berkala";
+    }
+    return { score, risk, status, criticals, warns, recs, hasCritical: criticals.length > 0, totalWeight: total };
+  },
+  defaultItems(){
+    const o = {};
+    CHECKLIST.forEach(it=>{
+      o[it.id] = it.id === "ITM-001" ? 0.5 : (it.id === "ITM-011" ? 0 : 1);
+    });
+    return o;
+  }
+};
+
+/* ==================== 4. AUTH & SESSION ==================== */
+let Session = null;
+
+const Auth = {
+  write(s){ Session = s; try{ sessionStorage.setItem(KEY.SESS, JSON.stringify(s)); }catch(e){} },
+  clear(){ Session = null; try{ sessionStorage.removeItem(KEY.SESS); }catch(e){} },
+  restore(){
+    try{
+      const v = sessionStorage.getItem(KEY.SESS);
+      Session = v ? JSON.parse(v) : null;
+    }catch(e){ Session = null; }
+    if(Session){
+      if(Session.role === "customer" && !Store.customer(Session.customerId)) Session = null;
+      if((Session.role === "admin" || Session.role === "teknisi") && !Store.user(Session.userId)) Session = null;
+    }
+    return Session;
+  },
+  loginStaff(role, username, password){
+    const u = Store.users().find(x=>x.username.toLowerCase() === String(username).toLowerCase().trim());
+    if(!u || u.password !== password) return null;
+    if(u.role !== role) return null;
+    this.write({ role:u.role, userId:u.id });
+    return u;
+  },
+  loginByToken(token){
+    const c = Store.customerByToken(String(token).trim());
+    if(!c) return null;
+    this.write({ role:"customer", customerId:c.id });
+    return c;
+  },
+  logout(){
+    this.clear();
+    try{ history.replaceState(null,"",location.pathname+location.search); }catch(e){}
+  }
+};
+
+/* ==================== 5. QR TOKEN ==================== */
+const QRService = {
+  genToken(){
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const cust = Store.customers();
+    let t = "";
+    do{
+      t = "";
+      for(let i=0;i<10;i++) t += chars[Math.floor(Math.random()*chars.length)];
+    }while(cust.some(c=>c.token === t));
+    return t;
+  },
+  loginUrl(token){
+    return location.href.split("#")[0] + "#scan=" + token;
+  },
+  render(el, token, size){
+    el.innerHTML = "";
+    new QRCode(el, {
+      text: this.loginUrl(token),
+      width: size || 96,
+      height: size || 96,
+      colorDark: "#1e3a8a",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  }
+};
+
+/* ==================== 6. UI HELPERS ==================== */
+function esc(v){
+  return String(v === null || v === undefined ? "" : v)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+function fmtNum(n){ return Number(n||0).toLocaleString("id-ID"); }
+function todayISO(){
+  const d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
+function fmtDate(iso){
+  if(!iso) return "-";
+  try{
+    const p = iso.split("-");
+    return new Date(+p[0], +p[1]-1, +p[2]).toLocaleDateString("id-ID", { day:"numeric", month:"short", year:"numeric" });
+  }catch(e){ return iso; }
+}
+function normalizeWA(raw){
+  let n = String(raw || "").replace(/[^0-9]/g, "");
+  if(!n) return "";
+  if(n.indexOf("0062") === 0) n = "62" + n.slice(4);
+  else if(n[0] === "0") n = "62" + n.slice(1);
+  else if(n[0] === "8") n = "62" + n;
+  if(n.length < 11 || n.length > 16 || n.indexOf("62") !== 0) return "";
+  return n;
+}
+function stripEmoji(s){
+  return String(s === null || s === undefined ? "" : s)
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, "")
+    .replace(/\s{2,}/g, " ").trim();
+}
+function openWA(wa, text){
+  const num = normalizeWA(wa);
+  if(!num) return toast("Nomor WhatsApp tidak valid. Format: 6281234567890", "error");
+  const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
+  const a = document.createElement("a");
+  a.href = url; a.target = "_blank"; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function toast(msg, type){
+  const root = document.getElementById("toast-root");
+  const color = type === "error" ? "bg-rose-600" : (type === "warn" ? "bg-amber-500" : "bg-slate-800");
+  const icon = type === "error" ? "fa-circle-exclamation" : (type === "warn" ? "fa-triangle-exclamation" : "fa-circle-check");
+  const el = document.createElement("div");
+  el.className = color + " text-white text-xs font-semibold px-4 py-3 rounded-xl shadow-lg flex items-start gap-2 fade-in";
+  el.innerHTML = '<i class="fa-solid ' + icon + ' mt-0.5"></i><span>' + esc(msg) + '</span>';
+  root.appendChild(el);
+  setTimeout(()=>{ el.style.transition = "opacity .3s"; el.style.opacity = "0"; setTimeout(()=>el.remove(), 320); }, 3000);
+}
+function openModal(html, opts){
+  const root = document.getElementById("modal-root");
+  const card = document.getElementById("modal-card");
+  card.className = "bg-white rounded-2xl max-w-" + ((opts && opts.size) || "lg") + " w-full max-h-[90vh] overflow-y-auto p-5 sm:p-6 relative fade-in";
+  card.innerHTML = html;
+  root.classList.remove("hidden");
+  root.classList.add("flex");
+}
+function closeModal(){
+  const root = document.getElementById("modal-root");
+  root.classList.add("hidden");
+  root.classList.remove("flex");
+}
+document.getElementById("modal-root").addEventListener("click", function(e){
+  if(e.target === this) closeModal();
+});
+function askConfirm(message, onYes, yesLabel){
+  openModal(
+    '<div class="text-center">' +
+      '<div class="bg-rose-100 text-rose-600 w-14 h-14 mx-auto rounded-full flex items-center justify-center text-2xl mb-3"><i class="fa-solid fa-triangle-exclamation"></i></div>' +
+      '<h3 class="text-lg font-black text-slate-800 mb-2">Konfirmasi</h3>' +
+      '<p class="text-sm text-slate-500 mb-5">' + esc(message) + '</p>' +
+      '<div class="flex gap-3">' +
+        '<button onclick="closeModal()" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 rounded-xl text-sm">Batal</button>' +
+        '<button id="confirm-yes" class="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-bold py-2.5 rounded-xl text-sm">' + esc(yesLabel || "Ya, Hapus") + '</button>' +
+      '</div>' +
+    '</div>', { size:"sm" });
+  document.getElementById("confirm-yes").onclick = function(){ closeModal(); onYes(); };
+}
+function printEl(el){
+  document.querySelectorAll(".printing").forEach(x=>x.classList.remove("printing"));
+  el.classList.add("printing");
+  setTimeout(()=>{ window.print(); setTimeout(()=>el.classList.remove("printing"), 400); }, 60);
+}
+function emptyState(icon, title, desc, actionHTML){
+  return '<div class="bg-white p-8 rounded-2xl border border-slate-200 text-center">' +
+    '<i class="fa-solid ' + icon + ' text-4xl text-slate-300 mb-3"></i>' +
+    '<h3 class="font-bold text-slate-700 mb-1">' + esc(title) + '</h3>' +
+    '<p class="text-xs text-slate-400 mb-4">' + esc(desc) + '</p>' +
+    (actionHTML || "") +
+  '</div>';
+}
+function riskClass(risk){
+  const r = String(risk||"");
+  if(r.indexOf("PRIORITAS") >= 0 || r.indexOf("BAHAYA") >= 0) return "bg-rose-100 text-rose-700";
+  if(r.indexOf("PERHATIAN") >= 0) return "bg-amber-100 text-amber-700";
+  return "bg-emerald-100 text-emerald-700";
+}
+function scoreColor(score){
+  if(score >= 85) return "text-emerald-600";
+  if(score >= 75) return "text-amber-500";
+  return "text-rose-600";
+}
+
+/* ==================== 7. ROUTER ==================== */
+const ROUTES = {
+  admin: ["dashboard","customers","customer-form","logs","log-form","technicians","tech-form"],
+  teknisi: ["input","passport","mylogs"],
+  customer: ["home","history"]
+};
+const NAVS = {
+  admin: [
+    { id:"dashboard", label:"Dashboard", icon:"fa-chart-pie" },
+    { id:"customers", label:"Customer", icon:"fa-users" },
+    { id:"logs", label:"Log Servis", icon:"fa-clipboard-list" },
+    { id:"technicians", label:"Teknisi", icon:"fa-user-gear" }
+  ],
+  teknisi: [
+    { id:"input", label:"Input Servis", icon:"fa-wrench" },
+    { id:"passport", label:"Passport", icon:"fa-id-card" },
+    { id:"mylogs", label:"Log Saya", icon:"fa-clock-rotate-left" }
+  ],
+  customer: [
+    { id:"home", label:"Beranda", icon:"fa-house" },
+    { id:"history", label:"Riwayat Servis", icon:"fa-book-open" }
+  ]
+};
+const DEFAULT_VIEW = { admin:"dashboard", teknisi:"input", customer:"home" };
+let CurrentView = null;
+
+function nav(view, param, keepScroll){
+  if(!Session){ showLogin(); return; }
+  if(ROUTES[Session.role].indexOf(view) < 0){
+    toast("Akses ditolak untuk peran Anda", "error");
+    return;
+  }
+  CurrentView = { view: view, param: param };
+  const html = renderView(view, param);
+  const box = document.getElementById("dynamic-view");
+  box.innerHTML = html;
+  box.classList.remove("fade-in");
+  void box.offsetWidth;
+  box.classList.add("fade-in");
+  if(view === "log-form") updateLive("lf");
+  if(view === "input") updateLive("ti");
+  renderPassportQRs();
+  if(!keepScroll) window.scrollTo({ top:0, behavior:"smooth" });
+  renderNav();
+}
+function searchNav(setter, value, view, focusId){
+  window[setter] = value;
+  nav(view, undefined, true);
+  requestAnimationFrame(function(){
+    const el = document.getElementById(focusId);
+    if(el){
+      el.focus();
+      const v = el.value;
+      try{ el.setSelectionRange(v.length, v.length); }catch(e){}
+    }
+  });
+}
+function renderNav(){
+  const navEl = document.getElementById("nav-menu");
+  if(!Session){ navEl.innerHTML = ""; return; }
+  navEl.innerHTML = NAVS[Session.role].map(n=>{
+    const active = CurrentView && CurrentView.view === n.id;
+    const activeCls = Session.role === "customer"
+      ? (active ? "bg-emerald-600 text-white" : "text-emerald-200 hover:bg-indigo-800")
+      : (active ? "bg-indigo-600 text-white" : "text-indigo-200 hover:bg-indigo-800");
+    return '<button onclick="nav(\'' + n.id + '\')" class="nav-btn px-3.5 py-2 rounded-lg whitespace-nowrap flex items-center gap-1.5 ' + activeCls + '">' +
+      '<i class="fa-solid ' + n.icon + '"></i> ' + esc(n.label) + '</button>';
+  }).join("");
+}
+function renderView(view, param){
+  if(Session.role === "admin"){
+    if(view === "dashboard") return viewAdminDashboard();
+    if(view === "customers") return viewAdminCustomers();
+    if(view === "customer-form") return viewAdminCustomerForm(param);
+    if(view === "logs") return viewAdminLogs();
+    if(view === "log-form") return viewAdminLogForm(param);
+    if(view === "technicians") return viewAdminTechnicians();
+    if(view === "tech-form") return viewAdminTechForm(param);
+  }
+  if(Session.role === "teknisi"){
+    if(view === "input") return viewTechInput();
+    if(view === "passport") return viewTechPassport(param);
+    if(view === "mylogs") return viewTechMyLogs();
+  }
+  if(Session.role === "customer"){
+    if(view === "home") return viewCustomerHome();
+    if(view === "history") return viewCustomerHistory();
+  }
+  return emptyState("fa-shield-halved","Halaman tidak ditemukan","Menu ini tidak tersedia untuk peran Anda.");
+}
+
+/* ==================== 8. STATS ==================== */
+function getStats(){
+  const cust = Store.customers();
+  const logs = Store.logs();
+  const avg = logs.length ? (logs.reduce((a,l)=>a+(l.score||0),0)/logs.length).toFixed(1) : "—";
+  const latest = {};
+  logs.forEach(l=>{
+    if(!latest[l.customerId] || sortDesc(l, latest[l.customerId]) < 0) latest[l.customerId] = l;
+  });
+  const criticalUnits = Object.values(latest).filter(l=>l.criticals && l.criticals.length > 0).length;
+  return { cust:cust.length, logs:logs.length, avg:avg, crit:criticalUnits, latest:latest };
+}
+
+/* ==================== 8b. REMINDER (Jadwal & Pengingat Servis) ==================== */
+function addDaysISO(iso, n){
+  if(!iso) return null;
+  const p = String(iso).split("-");
+  if(p.length !== 3) return null;
+  const d = new Date(+p[0], +p[1] - 1, +p[2] + (n || 0));
+  if(isNaN(d.getTime())) return null;
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
+function daysBetween(fromISO, toISO){
+  if(!fromISO || !toISO) return null;
+  const a = new Date(String(fromISO) + "T00:00:00");
+  const b = new Date(String(toISO) + "T00:00:00");
+  if(isNaN(a.getTime()) || isNaN(b.getTime())) return null;
+  return Math.round((b.getTime() - a.getTime()) / 86400000);
+}
+function nextServiceDate(log){
+  if(!log || !log.date) return null;
+  return addDaysISO(log.date, Store.settings().intervalDays);
+}
+function reminderLabel(r){
+  if(!r) return "";
+  if(r.status === "due") return "Jatuh tempo hari ini";
+  if(r.status === "overdue") return "Terlambat " + Math.abs(r.diff) + " hari";
+  return r.diff + " hari lagi";
+}
+function reminderLevelCls(status){
+  if(status === "overdue") return { box:"bg-rose-50 border-rose-200", badge:"bg-rose-600 text-white", text:"text-rose-700", icon:"fa-triangle-exclamation" };
+  if(status === "due") return { box:"bg-amber-50 border-amber-200", badge:"bg-amber-500 text-white", text:"text-amber-700", icon:"fa-bell" };
+  return { box:"bg-orange-50 border-orange-200", badge:"bg-orange-500 text-white", text:"text-orange-700", icon:"fa-clock" };
+}
+function reminderFor(customerId){
+  const c = Store.customer(customerId);
+  if(!c) return null;
+  const log = Store.logsOf(customerId)[0];
+  if(!log) return null;
+  const s = Store.settings();
+  const next = nextServiceDate(log);
+  if(!next) return null;
+  const diff = daysBetween(todayISO(), next);
+  if(diff === null || diff > s.leadDays) return null;
+  const status = diff > 0 ? "soon" : (diff === 0 ? "due" : "overdue");
+  const r = { customer:c, log:log, next:next, diff:diff, status:status };
+  r.label = reminderLabel(r);
+  return r;
+}
+function remindersAll(){
+  const rank = { overdue:0, due:1, soon:2 };
+  return Store.customers().map(c=>reminderFor(c.id)).filter(Boolean).sort(function(a,b){
+    if(rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+    return a.diff - b.diff;
+  });
+}
+function remindersForRole(role){
+  if(role === "customer"){
+    const cid = Session && Session.customerId;
+    return cid ? remindersAll().filter(r=>r.customer.id === cid) : [];
+  }
+  return remindersAll();
+}
+function buildReminderText(r){
+  if(!r) return "";
+  const c = r.customer;
+  return stripEmoji([
+    "*PENGINGAT SERVIS*",
+    "-------------------------------------",
+    "Halo *" + c.name + "*,",
+    "",
+    "Servis berikutnya untuk *" + c.plate + "* (" + c.model + ")",
+    "jatuh tempo *" + fmtDate(r.next) + "* — " + r.label + ".",
+    "",
+    "Health Index terakhir: " + r.log.score + "/100",
+    "Status: " + r.log.status,
+    "",
+    "Silakan hubungi Auto Jats Service untuk booking.",
+    "-------------------------------------",
+    "_Auto Jats Service — AJHI_"
+  ].join("\n"));
+}
+function buildBookingText(r){
+  if(!r) return "";
+  const c = r.customer;
+  return stripEmoji([
+    "*BOOKING SERVIS*",
+    "-------------------------------------",
+    "Halo Auto Jats Service,",
+    "",
+    "Saya *" + c.name + "* ingin booking servis untuk",
+    "*" + c.plate + "* (" + c.model + ").",
+    "",
+    "Jadwal servis berikutnya: *" + fmtDate(r.next) + "* (" + r.label + ")",
+    "Health Index terakhir: " + r.log.score + "/100",
+    "",
+    "Mohon informasi jadwal yang tersedia. Terima kasih.",
+    "-------------------------------------",
+    "_" + c.name + " — AJHI_"
+  ].join("\n"));
+}
+function sendReminderWA(cid){
+  const r = reminderFor(cid);
+  if(!r) return toast("Tidak ada pengingat aktif untuk customer ini", "warn");
+  return openWA(r.customer.wa, buildReminderText(r));
+}
+function bookingWA(cid){
+  const r = reminderFor(cid);
+  if(!r) return toast("Belum ada jadwal servis berikutnya", "warn");
+  return openWA(r.customer.wa, buildBookingText(r));
+}
+function reminderRowHTML(r){
+  const lvl = reminderLevelCls(r.status);
+  return '<div class="flex items-center justify-between gap-3 py-2.5 border-b border-slate-100 last:border-0 flex-wrap" data-reminder="' + esc(r.customer.id) + '">' +
+    '<div class="min-w-0 flex-1">' +
+      '<div class="text-xs font-bold text-slate-800 truncate">' + esc(r.customer.name) + '</div>' +
+      '<div class="text-[11px] text-slate-500 truncate">' + esc(r.customer.plate) + ' · jatuh tempo ' + fmtDate(r.next) + '</div>' +
+    '</div>' +
+    '<span class="px-2 py-0.5 rounded-full text-[10px] font-black flex-none ' + lvl.badge + '">' + esc(r.label) + '</span>' +
+    '<div class="flex gap-2 flex-none">' +
+      '<button onclick="sendReminderWA(\'' + r.customer.id + '\')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold px-3 py-1.5 rounded-lg"><i class="fa-brands fa-whatsapp mr-1"></i>Kirim</button>' +
+      '<button onclick="showCustomerDetail(\'' + r.customer.id + '\')" class="bg-slate-100 hover:bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-lg">Lihat</button>' +
+    '</div>' +
+  '</div>';
+}
+function reminderCardAdmin(){
+  const list = remindersForRole("admin");
+  if(!list.length) return "";
+  const shown = list.slice(0,5);
+  return '<div id="reminder-card" class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+    '<div class="flex items-center justify-between mb-2 gap-2 flex-wrap">' +
+      '<h3 class="font-bold text-slate-800 text-sm"><i class="fa-solid fa-bell text-amber-500 mr-2"></i>Pengingat Servis' +
+        '<span class="text-slate-400 font-normal"> · ' + list.length + ' customer</span></h3>' +
+      '<button onclick="openSettingsModal()" class="text-xs text-indigo-600 font-semibold hover:underline"><i class="fa-solid fa-gear mr-1"></i>Pengaturan</button>' +
+    '</div>' +
+    '<p class="text-[11px] text-slate-500 mb-2">Servis berikutnya jatuh tempo dalam ' + Store.settings().leadDays + ' hari atau sudah terlewat.</p>' +
+    '<div>' + shown.map(reminderRowHTML).join("") + '</div>' +
+    (list.length > shown.length ? '<div class="text-[11px] text-slate-400 mt-2 text-center">+' + (list.length - shown.length) + ' pengingat lainnya</div>' : '') +
+  '</div>';
+}
+function reminderStripTech(){
+  const list = remindersForRole("teknisi");
+  if(!list.length) return "";
+  const shown = list.slice(0,3);
+  return '<div id="reminder-strip" class="rounded-2xl border px-4 py-3 flex items-center justify-between gap-3 flex-wrap ' + reminderLevelCls(list[0].status).box + '">' +
+    '<div class="text-xs text-slate-700 min-w-0">' +
+      '<b><i class="fa-solid fa-bell text-amber-500 mr-1.5"></i>' + list.length + ' customer perlu diingatkan</b>' +
+      '<div class="text-[11px] text-slate-500 truncate">' +
+        shown.map(function(r){ return esc(r.customer.name) + ' (' + esc(r.label) + ')'; }).join(" · ") +
+        (list.length > shown.length ? ', +' + (list.length - shown.length) + ' lainnya' : '') +
+      '</div>' +
+    '</div>' +
+    '<button onclick="openReminderList()" class="text-[11px] font-bold text-indigo-700 bg-white border border-indigo-200 px-3 py-1.5 rounded-lg flex-none">Lihat</button>' +
+  '</div>';
+}
+function reminderBannerCustomer(){
+  const r = remindersForRole("customer")[0];
+  if(!r) return "";
+  const lvl = reminderLevelCls(r.status);
+  return '<div id="reminder-banner" class="rounded-2xl border-2 px-4 py-4 shadow-sm ' + lvl.box + '">' +
+    '<div class="flex items-start justify-between gap-3">' +
+      '<div class="flex items-center gap-2.5 min-w-0">' +
+        '<span class="w-9 h-9 rounded-xl flex items-center justify-center flex-none text-white ' + lvl.badge + '"><i class="fa-solid ' + lvl.icon + '"></i></span>' +
+        '<div class="min-w-0">' +
+          '<div class="text-[10px] uppercase tracking-widest font-bold ' + lvl.text + '">Pengingat Servis</div>' +
+          '<div class="text-sm font-black text-slate-800 truncate">' + esc(r.customer.plate) + '</div>' +
+          '<div class="text-[11px] text-slate-500 truncate">' + esc(r.customer.model) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<span class="px-2.5 py-1 rounded-full text-[10px] font-black flex-none text-white ' + lvl.badge + '">' + esc(r.label) + '</span>' +
+    '</div>' +
+    '<div class="mt-3 text-xs space-y-1.5">' +
+      '<div class="flex justify-between gap-3"><span class="text-slate-500">Servis berikutnya</span><b class="font-mono text-slate-800">' + fmtDate(r.next) + '</b></div>' +
+      '<div class="flex justify-between gap-3"><span class="text-slate-500">Health Index terakhir</span><b class="' + scoreColor(r.log.score) + '">' + r.log.score + '/100</b></div>' +
+      '<div class="flex justify-between gap-3"><span class="text-slate-500">Status</span><b class="text-slate-700">' + esc(r.log.status) + '</b></div>' +
+    '</div>' +
+    '<div class="flex gap-2 mt-3.5">' +
+      '<button onclick="bookingWA(\'' + r.customer.id + '\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2.5 rounded-xl"><i class="fa-brands fa-whatsapp mr-1.5"></i>Booking via WA</button>' +
+      '<button onclick="nav(\'history\')" class="bg-white border border-slate-300 text-slate-700 text-xs font-bold py-2.5 px-4 rounded-xl">Riwayat</button>' +
+    '</div>' +
+  '</div>';
+}
+function openReminderList(){
+  const list = remindersForRole(Session.role);
+  if(!list.length) return toast("Belum ada pengingat aktif", "warn");
+  openModal(
+    '<div class="flex items-center justify-between mb-4">' +
+      '<div><span class="text-[10px] uppercase tracking-widest text-indigo-600 font-bold">Pengingat Servis</span>' +
+      '<h3 class="text-lg font-black text-slate-800">' + list.length + ' customer</h3></div>' +
+      '<button onclick="closeModal()" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200 flex-none"><i class="fa-solid fa-xmark"></i></button>' +
+    '</div>' +
+    '<div>' + list.map(reminderRowHTML).join("") + '</div>', { size:"lg" });
+}
+function openSettingsModal(){
+  const s = Store.settings();
+  openModal(
+    '<div class="flex items-center justify-between mb-4">' +
+      '<div><span class="text-[10px] uppercase tracking-widest text-indigo-600 font-bold">Pengaturan</span>' +
+      '<h3 class="text-lg font-black text-slate-800">Jadwal &amp; Pengingat</h3></div>' +
+      '<button onclick="closeModal()" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200 flex-none"><i class="fa-solid fa-xmark"></i></button>' +
+    '</div>' +
+    '<div class="space-y-4">' +
+      '<div>' +
+        '<label for="set-interval" class="block text-xs font-semibold text-slate-600 mb-1.5">Interval servis (hari)</label>' +
+        '<input id="set-interval" type="number" min="7" max="365" value="' + s.intervalDays + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500">' +
+        '<p class="text-[11px] text-slate-400 mt-1">Servis berikutnya = tanggal servis terakhir + interval ini. Rentang 7–365.</p>' +
+      '</div>' +
+      '<div>' +
+        '<label for="set-lead" class="block text-xs font-semibold text-slate-600 mb-1.5">Jendela pengingat (H-n sebelum jatuh tempo)</label>' +
+        '<input id="set-lead" type="number" min="1" max="14" value="' + s.leadDays + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500">' +
+        '<p class="text-[11px] text-slate-400 mt-1">Pengingat tampil mulai H-n sampai lewat tempo. Rentang 1–14.</p>' +
+      '</div>' +
+      '<div id="set-error" class="text-xs text-rose-600 font-semibold hidden"></div>' +
+      '<div class="flex gap-3">' +
+        '<button onclick="closeModal()" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 rounded-xl text-sm">Batal</button>' +
+        '<button id="set-save" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-xl text-sm">Simpan</button>' +
+      '</div>' +
+    '</div>', { size:"md" });
+  document.getElementById("set-save").onclick = saveSettings;
+}
+function saveSettings(){
+  const iv = parseInt(document.getElementById("set-interval").value, 10);
+  const ld = parseInt(document.getElementById("set-lead").value, 10);
+  const err = document.getElementById("set-error");
+  const fail = function(m){ err.textContent = m; err.classList.remove("hidden"); };
+  err.classList.add("hidden");
+  if(!isFinite(iv) || iv < 7 || iv > 365) return fail("Interval servis harus antara 7 dan 365 hari.");
+  if(!isFinite(ld) || ld < 1 || ld > 14) return fail("Jendela pengingat harus antara 1 dan 14 hari.");
+  Store.setSettings({ intervalDays: iv, leadDays: ld });
+  closeModal();
+  toast("Pengaturan disimpan · interval " + iv + " hari, pengingat H-" + ld);
+  if(CurrentView) nav(CurrentView.view, CurrentView.param, true);
+}
+
+/* ==================== 9. CHECKLIST RENDER ==================== */
+function checklistHTML(prefix, items, liveFn){
+  return CHECKLIST.map(it=>{
+    const crit = it.level === "Critical";
+    const v = items && items[it.id] !== undefined ? parseFloat(items[it.id]) : Engine.defaultItems()[it.id];
+    const lvlCls = crit ? "bg-rose-100 text-rose-700" : (it.level === "Major" ? "bg-indigo-100 text-indigo-700" : "bg-slate-200 text-slate-600");
+    return '<div class="flex flex-col sm:flex-row sm:items-center justify-between p-2.5 rounded-xl border border-slate-100 bg-slate-50 gap-2">' +
+      '<div class="flex items-center gap-2 min-w-0">' +
+        '<span class="text-[10px] px-2 py-0.5 rounded font-bold flex-none ' + lvlCls + '">' + esc(it.level) + '</span>' +
+        '<span class="text-xs font-semibold text-slate-800 truncate" title="' + esc(it.name) + '">' + esc(it.name) + '</span>' +
+        '<span class="text-[10px] text-slate-400 font-bold flex-none">w' + it.weight + '</span>' +
+      '</div>' +
+      '<select id="' + prefix + '_' + it.id + '" onchange="' + liveFn + '()" class="text-xs font-semibold bg-white border border-slate-300 rounded-lg px-2 py-1.5 outline-none focus:ring-2 focus:ring-indigo-500 flex-none">' +
+        '<option value="1"' + (v === 1 ? " selected" : "") + '>🟢 Normal</option>' +
+        '<option value="0.5"' + (v === 0.5 ? " selected" : "") + '>🟡 Perlu Perhatian</option>' +
+        '<option value="0"' + (v === 0 ? " selected" : "") + '>🔴 Kritis / Rusak</option>' +
+      '</select>' +
+    '</div>';
+  }).join("");
+}
+function readItems(prefix){
+  const o = {};
+  CHECKLIST.forEach(it=>{
+    const el = document.getElementById(prefix + "_" + it.id);
+    o[it.id] = el ? parseFloat(el.value) : 1;
+  });
+  return o;
+}
+function liveScoreHTML(prefix){
+  return '<div id="' + prefix + '-panel" class="bg-indigo-950 text-white rounded-2xl p-4 sm:p-5">' +
+    '<div class="flex items-center justify-between gap-4 flex-wrap">' +
+      '<div>' +
+        '<span class="text-[10px] uppercase tracking-widest text-indigo-300 font-bold">Live Health Index</span>' +
+        '<div class="text-4xl font-black leading-none mt-1"><span id="' + prefix + '-score">0</span><span class="text-base font-normal text-indigo-400">/100</span></div>' +
+      '</div>' +
+      '<div class="text-right">' +
+        '<span id="' + prefix + '-risk" class="px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300">🟢 NORMAL</span>' +
+        '<div id="' + prefix + '-status" class="text-[11px] text-indigo-200 mt-2 font-semibold">Sehat / Optimal</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="grid grid-cols-3 gap-2 mt-4 text-center">' +
+      '<div class="bg-white/5 rounded-xl py-2"><div id="' + prefix + '-crit" class="text-lg font-black text-rose-300">0</div><div class="text-[9px] uppercase tracking-wider text-indigo-300">Item Kritis</div></div>' +
+      '<div class="bg-white/5 rounded-xl py-2"><div id="' + prefix + '-warn" class="text-lg font-black text-amber-300">0</div><div class="text-[9px] uppercase tracking-wider text-indigo-300">Perhatian</div></div>' +
+      '<div class="bg-white/5 rounded-xl py-2"><div class="text-lg font-black text-indigo-200">' + TOTAL_WEIGHT + '</div><div class="text-[9px] uppercase tracking-wider text-indigo-300">Total Bobot</div></div>' +
+    '</div>' +
+    '<div id="' + prefix + '-warning" class="hidden mt-4 bg-rose-500/15 border border-rose-400/40 text-rose-200 text-[11px] rounded-xl p-3 leading-relaxed"></div>' +
+  '</div>';
+}
+function updateLive(prefix){
+  const r = Engine.compute(readItems(prefix));
+  document.getElementById(prefix + "-score").textContent = r.score;
+  const risk = document.getElementById(prefix + "-risk");
+  risk.textContent = r.risk;
+  risk.className = "px-3 py-1.5 rounded-full text-xs font-bold " + (r.hasCritical ? "bg-rose-500/25 text-rose-300" : (r.risk.indexOf("PERHATIAN") >= 0 ? "bg-amber-500/25 text-amber-300" : "bg-emerald-500/20 text-emerald-300"));
+  document.getElementById(prefix + "-status").textContent = r.status;
+  document.getElementById(prefix + "-crit").textContent = r.criticals.length;
+  document.getElementById(prefix + "-warn").textContent = r.warns.length;
+  const w = document.getElementById(prefix + "-warning");
+  if(r.hasCritical){
+    w.classList.remove("hidden");
+    w.innerHTML = '<b><i class="fa-solid fa-triangle-exclamation"></i> WARNING KESELAMATAN:</b> ' + esc(r.criticals.join(", "));
+  }else{
+    w.classList.add("hidden");
+    w.innerHTML = "";
+  }
+  return r;
+}
+
+/* ==================== 10. ADMIN VIEWS ==================== */
+function statCard(icon, label, value, cls, bg){
+  return '<div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">' +
+    '<div class="flex items-center gap-3">' +
+      '<div class="' + (bg || "bg-indigo-50") + ' text-indigo-600 w-10 h-10 rounded-xl flex items-center justify-center"><i class="fa-solid ' + icon + '"></i></div>' +
+      '<div class="min-w-0">' +
+        '<div class="text-[10px] uppercase tracking-wider text-slate-400 font-bold truncate">' + esc(label) + '</div>' +
+        '<div class="text-2xl font-black ' + (cls || "text-slate-800") + '">' + esc(value) + '</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+function viewAdminDashboard(){
+  const s = getStats();
+  const logs = Store.logs().slice().sort(sortDesc).slice(0,6);
+  return '<div class="space-y-5">' +
+    '<div class="flex items-center justify-between flex-wrap gap-3">' +
+      '<div><h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-chart-pie text-indigo-600 mr-2"></i>Dashboard Admin</h2>' +
+      '<p class="text-xs text-slate-500">Ringkasan operasional Auto Jats Service</p></div>' +
+      '<div class="flex gap-2">' +
+        '<button onclick="nav(\'customer-form\')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl"><i class="fa-solid fa-plus mr-1.5"></i>Customer</button>' +
+        '<button onclick="confirmReset()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold px-4 py-2.5 rounded-xl"><i class="fa-solid fa-rotate-left mr-1.5"></i>Reset Demo</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="grid grid-cols-2 lg:grid-cols-4 gap-3">' +
+      statCard("fa-users","Total Customer", String(s.cust)) +
+      statCard("fa-clipboard-list","Total Log Servis", String(s.logs)) +
+      statCard("fa-gauge-high","Rata-rata Index", String(s.avg), "text-indigo-700", "bg-indigo-50") +
+      statCard("fa-triangle-exclamation","Unit Kritis", String(s.crit), "text-rose-600", "bg-rose-50") +
+    '</div>' +
+    reminderCardAdmin() +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<div class="flex items-center justify-between mb-3">' +
+        '<h3 class="font-bold text-slate-800 text-sm"><i class="fa-solid fa-clock-rotate-left text-indigo-600 mr-2"></i>Servis Terbaru</h3>' +
+        '<button onclick="nav(\'logs\')" class="text-xs text-indigo-600 font-semibold hover:underline">Lihat semua</button>' +
+      '</div>' +
+      (logs.length ? logTableHTML(logs, false) : emptyState("fa-inbox","Belum ada log servis","Data servis akan muncul di sini setelah teknisi input.")) +
+    '</div>' +
+  '</div>';
+}
+function confirmReset(){
+  askConfirm("Semua data akan dihapus dan diganti dengan data demo awal. Lanjutkan?", function(){
+    Store.resetDemo();
+    toast("Data demo berhasil di-reset");
+    nav("dashboard");
+  }, "Ya, Reset");
+}
+function viewAdminCustomers(){
+  const q = (window._custQuery || "").toLowerCase();
+  const list = Store.customers().filter(c=>
+    !q || c.name.toLowerCase().indexOf(q) >= 0 || c.plate.toLowerCase().indexOf(q) >= 0 || c.model.toLowerCase().indexOf(q) >= 0
+  );
+  const rows = list.map(c=>{
+    const n = Store.logsOf(c.id).length;
+    return '<tr class="hover:bg-slate-50">' +
+      '<td class="p-3 font-bold text-slate-800" data-label="Plat">' + esc(c.plate) + '</td>' +
+      '<td class="p-3" data-label="Nama">' + esc(c.name) + '</td>' +
+      '<td class="p-3 text-slate-500" data-label="Motor">' + esc(c.model) + '</td>' +
+      '<td class="p-3 text-slate-500" data-label="WhatsApp">' + esc(c.wa) + '</td>' +
+      '<td class="p-3 text-center" data-label="Servis">' + n + 'x</td>' +
+      '<td class="p-3 text-[10px] font-mono text-slate-400" data-label="Token">' + esc(c.token) + '</td>' +
+      '<td class="p-3 no-print" data-label="">' +
+        '<div class="flex items-center justify-end gap-1.5">' +
+          '<button title="Detail & QR" onclick="showCustomerDetail(\'' + c.id + '\')" class="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100"><i class="fa-solid fa-eye text-xs"></i></button>' +
+          '<button title="Edit" onclick="nav(\'customer-form\',\'' + c.id + '\')" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><i class="fa-solid fa-pen text-xs"></i></button>' +
+          '<button title="Hapus" onclick="deleteCustomer(\'' + c.id + '\')" class="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100"><i class="fa-solid fa-trash text-xs"></i></button>' +
+        '</div>' +
+      '</td>' +
+    '</tr>';
+  }).join("");
+  return '<div class="space-y-4">' +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">' +
+        '<div><h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-users text-indigo-600 mr-2"></i>Data Customer</h2>' +
+        '<p class="text-xs text-slate-500">' + Store.customers().length + ' terdaftar · QR login unik per customer</p></div>' +
+        '<div class="flex gap-2 items-center">' +
+          '<div class="relative flex-1 sm:w-56">' +
+            '<i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>' +
+            '<input type="text" id="cust-search" value="' + esc(window._custQuery || "") + '" oninput="searchNav(\'_custQuery\', this.value, \'customers\', \'cust-search\')" placeholder="Cari plat / nama / motor" class="w-full border rounded-lg pl-8 pr-3 py-2 text-xs outline-none focus:ring-2 focus:ring-indigo-500">' +
+          '</div>' +
+          '<button onclick="nav(\'customer-form\')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded-lg whitespace-nowrap"><i class="fa-solid fa-plus mr-1.5"></i>Tambah</button>' +
+        '</div>' +
+      '</div>' +
+      (list.length ?
+        '<div class="overflow-x-auto scroll-x"><table class="rtable w-full text-left text-xs border border-slate-100 rounded-xl overflow-hidden">' +
+          '<thead class="bg-slate-100 text-slate-600 uppercase text-[10px]"><tr>' +
+            '<th class="p-3">Plat</th><th class="p-3">Nama</th><th class="p-3">Motor</th><th class="p-3">WhatsApp</th>' +
+            '<th class="p-3 text-center">Servis</th><th class="p-3">Token QR</th><th class="p-3 text-right no-print">Aksi</th>' +
+          '</tr></thead><tbody class="divide-y divide-slate-100">' + rows + '</tbody></table></div>'
+        : emptyState("fa-user-slash","Customer tidak ditemukan", Store.customers().length ? "Coba kata kunci pencarian lain." : "Belum ada customer. Klik Tambah untuk mendaftarkan.",
+          Store.customers().length ? "" : '<button onclick="nav(\'customer-form\')" class="bg-indigo-600 text-white text-xs font-bold px-4 py-2 rounded-xl">Tambah Customer</button>')) +
+    '</div>' +
+  '</div>';
+}
+function viewAdminCustomerForm(id){
+  const c = id ? Store.customer(id) : null;
+  if(id && !c) return emptyState("fa-circle-exclamation","Data tidak ditemukan","Customer sudah dihapus.",'<button onclick="nav(\'customers\')" class="bg-indigo-600 text-white text-xs font-bold px-4 py-2 rounded-xl">Kembali</button>');
+  return '<div class="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-sm max-w-2xl mx-auto">' +
+    '<button onclick="nav(\'customers\')" class="text-xs text-slate-400 hover:text-slate-600 mb-4"><i class="fa-solid fa-arrow-left mr-1"></i>Kembali ke daftar</button>' +
+    '<h2 class="text-lg font-black text-slate-800 mb-1"><i class="fa-solid ' + (c ? "fa-pen" : "fa-user-plus") + ' text-indigo-600 mr-2"></i>' + (c ? "Edit Customer" : "Tambah Customer") + '</h2>' +
+    '<p class="text-xs text-slate-500 mb-5">Token QR login dibuat otomatis dan unik untuk setiap customer.</p>' +
+    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">' +
+      field("Nama Pemilik", '<input type="text" id="cf-name" value="' + esc(c ? c.name : "") + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Budi Santoso">') +
+      field("No. WhatsApp (format 6281234567890)", '<input type="text" id="cf-wa" value="' + esc(c ? c.wa : "") + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="6281234567890">') +
+      field("Nomor Polisi (Plat)", '<input type="text" id="cf-plate" value="' + esc(c ? c.plate : "") + '" class="w-full border rounded-xl px-3 py-2.5 uppercase font-bold outline-none focus:ring-2 focus:ring-indigo-500" placeholder="KT 1234 ABC">') +
+      field("Tipe Motor", '<input type="text" id="cf-model" value="' + esc(c ? c.model : "") + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Honda Vario 125">') +
+    '</div>' +
+    '<p id="cf-error" class="hidden text-xs text-rose-600 font-semibold mt-4"></p>' +
+    '<div class="flex gap-3 mt-6">' +
+      '<button onclick="saveCustomer(\'' + (c ? c.id : "") + '\')" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-sm"><i class="fa-solid fa-floppy-disk mr-2"></i>Simpan</button>' +
+      '<button onclick="nav(\'customers\')" class="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold px-5 py-3 rounded-xl text-sm">Batal</button>' +
+    '</div>' +
+  '</div>';
+}
+function field(label, inputHTML){
+  return '<div><label class="block text-xs font-semibold text-slate-600 mb-1.5">' + esc(label) + '</label>' + inputHTML + '</div>';
+}
+function saveCustomer(id){
+  const name = document.getElementById("cf-name").value.trim();
+  const wa = document.getElementById("cf-wa").value.trim();
+  const plate = document.getElementById("cf-plate").value.trim().toUpperCase();
+  const model = document.getElementById("cf-model").value.trim();
+  const err = document.getElementById("cf-error");
+  const fail = function(m){ err.textContent = m; err.classList.remove("hidden"); };
+  if(!name || !plate || !model) return fail("Nama, plat, dan tipe motor wajib diisi.");
+  if(wa && !/[0-9]/.test(wa)) return fail("Nomor WhatsApp harus berisi angka.");
+  const cleanWa = normalizeWA(wa);
+  if(wa && !cleanWa) return fail("Nomor WhatsApp tidak valid. Gunakan format 6281234567890 (awali 62, 11-16 digit).");
+  const list = Store.customers();
+  if(list.some(c=>c.plate.toUpperCase() === plate && c.id !== id)) return fail("Nomor polisi sudah terdaftar untuk customer lain.");
+  if(id){
+    const idx = list.findIndex(x=>x.id === id);
+    if(idx < 0) return fail("Data tidak ditemukan.");
+    list[idx].name = name; list[idx].wa = cleanWa; list[idx].plate = plate; list[idx].model = model;
+    Store.setCustomers(list);
+    toast("Data customer diperbarui");
+  }else{
+    const nc = {
+      id: Store.nextId("C-", list),
+      token: QRService.genToken(),
+      name: name, wa: cleanWa, plate: plate, model: model,
+      createdAt: new Date().toISOString()
+    };
+    list.push(nc);
+    Store.setCustomers(list);
+    toast("Customer ditambahkan");
+  }
+  window._custQuery = "";
+  nav("customers");
+}
+function deleteCustomer(id){
+  const c = Store.customer(id);
+  if(!c) return;
+  const n = Store.logsOf(id).length;
+  askConfirm("Hapus " + c.name + " (" + c.plate + ")" + (n ? " beserta " + n + " log servisnya" : "") + "?", function(){
+    Store.setCustomers(Store.customers().filter(x=>x.id !== id));
+    Store.setLogs(Store.logs().filter(l=>l.customerId !== id));
+    toast("Customer dihapus");
+    nav("customers");
+  });
+}
+function showCustomerDetail(id){
+  const c = Store.customer(id);
+  if(!c) return;
+  const logs = Store.logsOf(id);
+  const last = logs[0];
+  let html = '<div class="flex items-start justify-between gap-3 mb-4">' +
+      '<div class="min-w-0">' +
+        '<span class="text-[10px] font-bold uppercase tracking-widest text-indigo-600">Detail Customer</span>' +
+        '<h3 class="text-xl font-black text-slate-800 truncate">' + esc(c.name) + '</h3>' +
+        '<p class="text-xs text-slate-500">' + esc(c.plate) + ' · ' + esc(c.model) + '</p>' +
+      '</div>' +
+      '<button onclick="closeModal()" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:bg-slate-200 flex-none"><i class="fa-solid fa-xmark"></i></button>' +
+    '</div>' +
+    '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">' +
+      '<div class="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-center">' +
+        '<div id="cust-qr" class="inline-block bg-white p-2 rounded-xl shadow-sm"></div>' +
+        '<p class="text-[10px] text-slate-500 mt-2 leading-relaxed">Scan QR ini untuk <b>login</b> sebagai customer</p>' +
+        '<p class="text-[10px] font-mono text-slate-400 mt-1 break-all">' + esc(QRService.loginUrl(c.token)) + '</p>' +
+        '<div class="flex gap-2 mt-3">' +
+          '<button onclick="printQR(\'' + c.id + '\')" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold py-2 rounded-lg"><i class="fa-solid fa-print mr-1.5"></i>Cetak</button>' +
+          '<button onclick="regenToken(\'' + c.id + '\')" class="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold py-2 rounded-lg"><i class="fa-solid fa-rotate mr-1.5"></i>Regen</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="space-y-3">' +
+        '<div class="bg-slate-50 rounded-2xl p-4 border border-slate-200">' +
+          '<div class="text-[10px] uppercase font-bold text-slate-400 mb-2">Info Kontak</div>' +
+          '<div class="text-xs space-y-1.5 text-slate-600">' +
+            '<div class="flex justify-between gap-3"><span class="text-slate-400">WhatsApp</span><b class="font-mono">' + esc(c.wa || "-") + '</b></div>' +
+            '<div class="flex justify-between gap-3"><span class="text-slate-400">Total Servis</span><b>' + logs.length + ' kali</b></div>' +
+            '<div class="flex justify-between gap-3"><span class="text-slate-400">Odo Terakhir</span><b>' + (last ? fmtNum(last.odo) + " KM" : "-") + '</b></div>' +
+            '<div class="flex justify-between gap-3"><span class="text-slate-400">Index Terakhir</span><b class="' + (last ? scoreColor(last.score) : "") + '">' + (last ? last.score + "/100" : "-") + '</b></div>' +
+            '<div class="flex justify-between gap-3"><span class="text-slate-400">Token</span><b class="font-mono text-[10px]">' + esc(c.token) + '</b></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="flex gap-2">' +
+          (custWAUrl(c) ? '<a href="' + esc(custWAUrl(c)) + '" target="_blank" rel="noopener" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2.5 rounded-xl text-center"><i class="fa-brands fa-whatsapp mr-1.5"></i>Chat WA</a>'
+            : '<button onclick="toast(\'Nomor WhatsApp customer ini belum valid. Edit data dulu.\',\'warn\')" class="flex-1 bg-slate-200 text-slate-400 text-xs font-bold py-2.5 rounded-xl text-center cursor-not-allowed"><i class="fa-brands fa-whatsapp mr-1.5"></i>Chat WA</button>') +
+          '<button onclick="closeModal();nav(\'customer-form\',\'' + c.id + '\')" class="flex-1 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2.5 rounded-xl"><i class="fa-solid fa-pen mr-1.5"></i>Edit Data</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mt-5">' +
+      '<div class="text-[10px] uppercase font-bold text-slate-400 mb-2">Riwayat Singkat</div>' +
+      (logs.length ? '<div class="space-y-2 max-h-56 overflow-y-auto pr-1">' + logs.map(l=>
+        '<div class="flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs">' +
+          '<div class="min-w-0"><b class="text-slate-700">' + fmtDate(l.date) + '</b><span class="text-slate-400"> · ' + fmtNum(l.odo) + ' KM</span></div>' +
+          '<div class="flex items-center gap-2 flex-none"><b class="' + scoreColor(l.score) + '">' + l.score + '</b><span class="px-2 py-0.5 rounded-full text-[9px] font-bold ' + riskClass(l.risk) + '">' + esc(l.risk) + '</span></div>' +
+        '</div>').join("") + '</div>'
+        : '<p class="text-xs text-slate-400">Belum ada riwayat servis.</p>') +
+    '</div>';
+  openModal(html, { size:"lg" });
+  QRService.render(document.getElementById("cust-qr"), c.token, 120);
+}
+function allNormal(){ const o = {}; CHECKLIST.forEach(i=>o[i.id] = 1); return o; }
+function printQR(id){
+  const c = Store.customer(id);
+  if(!c) return;
+  openModal(
+    '<div class="text-center" id="qr-print-area">' +
+      '<div class="bg-indigo-900 text-white -mx-5 -mt-5 sm:-mx-6 sm:-mt-6 px-6 py-4 mb-5 rounded-t-2xl">' +
+        '<div class="text-amber-400 font-black text-lg"><i class="fa-solid fa-motorcycle mr-2"></i>Auto Jats Service</div>' +
+        '<div class="text-[11px] text-indigo-200">AJHI - QR Login Customer</div>' +
+      '</div>' +
+      '<div id="print-qr" class="inline-block bg-white p-3 rounded-xl border border-slate-200"></div>' +
+      '<h3 class="text-xl font-black text-slate-800 mt-4">' + esc(c.name) + '</h3>' +
+      '<p class="text-sm font-bold text-indigo-700">' + esc(c.plate) + '</p>' +
+      '<p class="text-xs text-slate-500 mt-1">' + esc(c.model) + '</p>' +
+      '<div class="bg-slate-50 border border-dashed border-slate-300 rounded-xl p-3 mt-4 text-[11px] text-slate-600 leading-relaxed">' +
+        'Scan QR ini untuk masuk ke aplikasi AJHI dan melihat riwayat servis kendaraan Anda.<br>' +
+        '<span class="font-mono text-[10px] text-slate-400 break-all">' + esc(QRService.loginUrl(c.token)) + '</span>' +
+      '</div>' +
+      '<div class="mt-5 flex gap-3 no-print">' +
+        '<button onclick="printEl(document.getElementById(\'qr-print-area\'))" class="flex-1 bg-indigo-600 text-white font-bold py-2.5 rounded-xl text-sm"><i class="fa-solid fa-print mr-2"></i>Cetak</button>' +
+        '<button onclick="closeModal()" class="bg-slate-100 text-slate-600 font-bold px-5 py-2.5 rounded-xl text-sm">Tutup</button>' +
+      '</div>' +
+    '</div>', { size:"sm" });
+  QRService.render(document.getElementById("print-qr"), c.token, 160);
+}
+function regenToken(id){
+  askConfirm("Token QR lama akan hangus dan QR baru dibuat. Lanjutkan?", function(){
+    const list = Store.customers();
+    const c = list.find(x=>x.id === id);
+    if(!c) return;
+    c.token = QRService.genToken();
+    Store.setCustomers(list);
+    toast("Token QR diperbarui");
+    showCustomerDetail(id);
+  }, "Ya, Regen");
+}
+function viewAdminLogs(){
+  const q = (window._logQuery || "").toLowerCase();
+  const fc = window._logCust || "";
+  let list = Store.logs().slice().sort(sortDesc);
+  if(fc) list = list.filter(l=>l.customerId === fc);
+  if(q) list = list.filter(l=>{
+    const c = Store.customer(l.customerId);
+    return (c && (c.name.toLowerCase().indexOf(q) >= 0 || c.plate.toLowerCase().indexOf(q) >= 0)) || String(l.odo).indexOf(q) >= 0;
+  });
+  const custOpts = '<option value="">Semua customer</option>' + Store.customers().map(c=>
+    '<option value="' + c.id + '"' + (fc === c.id ? " selected" : "") + '>' + esc(c.name) + ' (' + esc(c.plate) + ')</option>').join("");
+  return '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+    '<div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-4">' +
+      '<div><h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-clipboard-list text-indigo-600 mr-2"></i>Log Servis</h2>' +
+      '<p class="text-xs text-slate-500">' + Store.logs().length + ' total data · edit untuk koreksi input teknisi</p></div>' +
+      '<div class="flex flex-col sm:flex-row gap-2">' +
+        '<select onchange="window._logCust=this.value;nav(\'logs\',undefined,true)" class="border rounded-lg px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-indigo-500">' + custOpts + '</select>' +
+        '<div class="relative">' +
+          '<i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>' +
+          '<input type="text" id="log-search" value="' + esc(window._logQuery || "") + '" oninput="searchNav(\'_logQuery\', this.value, \'logs\', \'log-search\')" placeholder="Cari plat / nama" class="border rounded-lg pl-8 pr-3 py-2 text-xs outline-none focus:ring-2 focus:ring-indigo-500 sm:w-52">' +
+        '</div>' +
+      '</div>' +
+    '</div>' +
+    (list.length ? logTableHTML(list, true) : emptyState("fa-inbox","Log tidak ditemukan", Store.logs().length ? "Coba ubah kata kunci atau filter customer." : "Belum ada log servis yang tersimpan.")) +
+  '</div>';
+}
+function logTableHTML(list, withAction){
+  const rows = list.map(l=>{
+    const c = Store.customer(l.customerId);
+    const name = c ? c.name : "Customer (dihapus)";
+    const plate = c ? c.plate : "-";
+    const act = withAction ?
+      '<td class="p-3 text-right no-print" data-label="">' +
+        '<div class="flex items-center justify-end gap-1.5">' +
+          '<button title="Edit" onclick="nav(\'log-form\',\'' + l.id + '\')" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><i class="fa-solid fa-pen text-xs"></i></button>' +
+          '<button title="Hapus" onclick="deleteLog(\'' + l.id + '\')" class="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100"><i class="fa-solid fa-trash text-xs"></i></button>' +
+        '</div>' +
+      '</td>' : "";
+    return '<tr class="hover:bg-slate-50">' +
+      '<td class="p-3 text-slate-500" data-label="Tanggal">' + fmtDate(l.date) + '</td>' +
+      '<td class="p-3 font-bold text-slate-800" data-label="Plat">' + esc(plate) + '</td>' +
+      '<td class="p-3" data-label="Pemilik">' + esc(name) + '</td>' +
+      '<td class="p-3 text-slate-500" data-label="KM">' + fmtNum(l.odo) + '</td>' +
+      '<td class="p-3 font-black ' + scoreColor(l.score) + '" data-label="Skor">' + l.score + '/100</td>' +
+      '<td class="p-3" data-label="Risk"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ' + riskClass(l.risk) + '">' + esc(l.risk) + '</span></td>' +
+      '<td class="p-3 text-slate-500 text-[11px]" data-label="Teknisi">' + esc(l.techName || "-") + '</td>' +
+      act +
+    '</tr>';
+  }).join("");
+  return '<div class="overflow-x-auto scroll-x"><table class="rtable w-full text-left text-xs border border-slate-100 rounded-xl overflow-hidden">' +
+    '<thead class="bg-slate-100 text-slate-600 uppercase text-[10px]"><tr>' +
+      '<th class="p-3">Tanggal</th><th class="p-3">Plat</th><th class="p-3">Pemilik</th><th class="p-3">KM</th>' +
+      '<th class="p-3">Skor</th><th class="p-3">Risk</th><th class="p-3">Teknisi</th>' + (withAction ? '<th class="p-3 text-right no-print">Aksi</th>' : '') +
+    '</tr></thead><tbody class="divide-y divide-slate-100">' + rows + '</tbody></table></div>';
+}
+function deleteLog(id){
+  askConfirm("Hapus log servis ini? Skor dan statistik akan ikut diperbarui.", function(){
+    Store.setLogs(Store.logs().filter(l=>l.id !== id));
+    toast("Log servis dihapus");
+    nav("logs");
+  });
+}
+function viewAdminLogForm(id){
+  const l = id ? Store.log(id) : null;
+  if(!l) return emptyState("fa-circle-exclamation","Log tidak ditemukan","Data mungkin sudah dihapus.",'<button onclick="nav(\'logs\')" class="bg-indigo-600 text-white text-xs font-bold px-4 py-2 rounded-xl">Kembali</button>');
+  const c = Store.customer(l.customerId);
+  return '<div class="max-w-3xl mx-auto space-y-4">' +
+    '<button onclick="nav(\'logs\')" class="text-xs text-slate-400 hover:text-slate-600"><i class="fa-solid fa-arrow-left mr-1"></i>Kembali ke daftar log</button>' +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<h2 class="text-lg font-black text-slate-800 mb-1"><i class="fa-solid fa-pen-to-square text-indigo-600 mr-2"></i>Edit Log Servis</h2>' +
+      '<p class="text-xs text-slate-500 mb-4">Mengubah item akan menghitung ulang Health Index secara otomatis.</p>' +
+      '<div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">' +
+        field("Customer", '<div class="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-white font-semibold">' + esc(c ? c.name : "Dihapus") + '</div>') +
+        field("Nomor Polisi", '<div class="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-white font-bold uppercase">' + esc(c ? c.plate : "-") + '</div>') +
+        field("Teknisi Input", '<div class="w-full border border-slate-200 rounded-xl px-3 py-2.5 bg-white">' + esc(l.techName || "-") + '</div>') +
+        field("Tanggal Servis", '<input type="date" id="lf-date" value="' + esc(l.date) + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500">') +
+        field("Odometer (KM)", '<input type="number" id="lf-odo" value="' + esc(l.odo) + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500">') +
+        field("Catatan Teknisi", '<input type="text" id="lf-note" value="' + esc(l.note || "") + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="-">') +
+      '</div>' +
+      '<div class="flex items-center justify-between mb-3">' +
+        '<h3 class="font-bold text-slate-800 text-sm"><i class="fa-solid fa-list-check text-indigo-600 mr-2"></i>Checklist Health Check</h3>' +
+        '<button onclick="resetChecklist(\'lf\')" class="text-[11px] text-slate-400 hover:text-slate-600">Reset ke Normal</button>' +
+      '</div>' +
+      '<div class="space-y-2 mb-4">' + checklistHTML("lf", l.items, "liveLF") + '</div>' +
+      liveScoreHTML("lf") +
+      '<div class="flex gap-3 mt-5">' +
+        '<button onclick="saveLogEdit(\'' + l.id + '\')" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-sm"><i class="fa-solid fa-floppy-disk mr-2"></i>Simpan Perubahan</button>' +
+        '<button onclick="nav(\'logs\')" class="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold px-5 py-3 rounded-xl text-sm">Batal</button>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+function liveLF(){ updateLive("lf"); }
+function liveTI(){ updateLive("ti"); }
+function resetChecklist(prefix){
+  const d = Engine.defaultItems();
+  CHECKLIST.forEach(it=>{
+    const el = document.getElementById(prefix + "_" + it.id);
+    if(el) el.value = String(d[it.id]);
+  });
+  updateLive(prefix);
+  toast("Checklist direset");
+}
+function saveLogEdit(id){
+  const logs = Store.logs();
+  const l = logs.find(x=>x.id === id);
+  if(!l) return toast("Log tidak ditemukan", "error");
+  const odo = parseInt(document.getElementById("lf-odo").value, 10);
+  const date = document.getElementById("lf-date").value;
+  if(!date) return toast("Tanggal wajib diisi", "error");
+  if(!odo || odo <= 0) return toast("Odometer harus lebih besar dari 0", "error");
+  const items = readItems("lf");
+  const r = Engine.compute(items);
+  l.date = date;
+  l.odo = odo;
+  l.note = document.getElementById("lf-note").value.trim();
+  l.items = items;
+  l.score = r.score;
+  l.risk = r.risk;
+  l.status = r.status;
+  l.criticals = r.criticals;
+  l.warns = r.warns;
+  l.recs = r.recs;
+  l.hasCritical = r.hasCritical;
+  l.updatedAt = new Date().toISOString();
+  Store.setLogs(logs);
+  toast("Log servis diperbarui · skor " + r.score + "/100");
+  const nextSched = nextServiceDate(l);
+  if(nextSched) toast("Pengingat berikutnya: " + fmtDate(nextSched) + " (H-" + Store.settings().leadDays + ")");
+  nav("logs");
+}
+function viewAdminTechnicians(){
+  const list = Store.users();
+  const rows = list.map(u=>{
+    const isSelf = Session.userId === u.id;
+    return '<tr class="hover:bg-slate-50">' +
+      '<td class="p-3 font-bold text-slate-800" data-label="Nama">' + esc(u.name) + '</td>' +
+      '<td class="p-3 font-mono text-slate-500" data-label="Username">' + esc(u.username) + '</td>' +
+      '<td class="p-3" data-label="Peran"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ' + (u.role === "admin" ? "bg-indigo-100 text-indigo-700" : "bg-slate-200 text-slate-700") + '">' + esc(u.role) + '</span></td>' +
+      '<td class="p-3 text-slate-500" data-label="Log Input">' + Store.logs().filter(l=>l.techId === u.id).length + 'x</td>' +
+      '<td class="p-3 text-right no-print" data-label="">' +
+        '<div class="flex items-center justify-end gap-1.5">' +
+          (u.role === "teknisi" ? '<button onclick="nav(\'tech-form\',\'' + u.id + '\')" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200"><i class="fa-solid fa-pen text-xs"></i></button>' : '') +
+          (u.role === "teknisi" && !isSelf ? '<button onclick="deleteUser(\'' + u.id + '\')" class="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100"><i class="fa-solid fa-trash text-xs"></i></button>' : '') +
+          (u.role === "admin" ? '<span class="text-[10px] text-slate-400 px-2">akun utama</span>' : '') +
+        '</div>' +
+      '</td>' +
+    '</tr>';
+  }).join("");
+  return '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+    '<div class="flex items-center justify-between mb-4 flex-wrap gap-3">' +
+      '<div><h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-user-gear text-indigo-600 mr-2"></i>Akun Admin &amp; Teknisi</h2>' +
+      '<p class="text-xs text-slate-500">Kelola akun yang bisa login ke aplikasi</p></div>' +
+      '<button onclick="nav(\'tech-form\')" class="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-4 py-2.5 rounded-xl"><i class="fa-solid fa-plus mr-1.5"></i>Tambah Teknisi</button>' +
+    '</div>' +
+    '<div class="overflow-x-auto scroll-x"><table class="rtable w-full text-left text-xs border border-slate-100 rounded-xl overflow-hidden">' +
+      '<thead class="bg-slate-100 text-slate-600 uppercase text-[10px]"><tr><th class="p-3">Nama</th><th class="p-3">Username</th><th class="p-3">Peran</th><th class="p-3">Log Input</th><th class="p-3 text-right no-print">Aksi</th></tr></thead>' +
+      '<tbody class="divide-y divide-slate-100">' + rows + '</tbody></table></div>' +
+  '</div>';
+}
+function viewAdminTechForm(id){
+  const u = id ? Store.user(id) : null;
+  if(id && !u) return emptyState("fa-circle-exclamation","Akun tidak ditemukan","Data mungkin sudah dihapus.");
+  return '<div class="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-sm max-w-md mx-auto">' +
+    '<button onclick="nav(\'technicians\')" class="text-xs text-slate-400 hover:text-slate-600 mb-4"><i class="fa-solid fa-arrow-left mr-1"></i>Kembali</button>' +
+    '<h2 class="text-lg font-black text-slate-800 mb-1"><i class="fa-solid ' + (u ? "fa-pen" : "fa-user-plus") + ' text-indigo-600 mr-2"></i>' + (u ? "Edit Teknisi" : "Tambah Teknisi") + '</h2>' +
+    '<p class="text-xs text-slate-500 mb-5">Akun teknisi dipakai untuk login dan input data servis.</p>' +
+    '<div class="space-y-4 text-sm">' +
+      field("Nama Lengkap", '<input type="text" id="tf-name" value="' + esc(u ? u.name : "") + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Andi Wijaya">') +
+      field("Username", '<input type="text" id="tf-username" value="' + esc(u ? u.username : "") + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="teknisi2">') +
+      field("Password", '<input type="text" id="tf-password" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="' + (u ? "biarkan kosong jika tidak diganti" : "minimal 4 karakter") + '">') +
+    '</div>' +
+    '<p id="tf-error" class="hidden text-xs text-rose-600 font-semibold mt-4"></p>' +
+    '<div class="flex gap-3 mt-6">' +
+      '<button onclick="saveUser(\'' + (u ? u.id : "") + '\')" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl text-sm"><i class="fa-solid fa-floppy-disk mr-2"></i>Simpan</button>' +
+      '<button onclick="nav(\'technicians\')" class="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold px-5 py-3 rounded-xl text-sm">Batal</button>' +
+    '</div>' +
+  '</div>';
+}
+function saveUser(id){
+  const name = document.getElementById("tf-name").value.trim();
+  const username = document.getElementById("tf-username").value.trim();
+  const password = document.getElementById("tf-password").value;
+  const err = document.getElementById("tf-error");
+  const fail = m => { err.textContent = m; err.classList.remove("hidden"); };
+  if(!name || !username) return fail("Nama dan username wajib diisi.");
+  const list = Store.users();
+  if(list.some(u=>u.username.toLowerCase() === username.toLowerCase() && u.id !== id)) return fail("Username sudah dipakai.");
+  if(id){
+    const idx = list.findIndex(x=>x.id === id);
+    if(idx < 0) return fail("Akun tidak ditemukan.");
+    list[idx].name = name;
+    list[idx].username = username;
+    if(password) list[idx].password = password;
+    Store.setUsers(list);
+    toast("Akun teknisi diperbarui");
+  }else{
+    if(!password || password.length < 4) return fail("Password minimal 4 karakter.");
+    list.push({ id: Store.nextId("U-", list), role:"teknisi", username:username, password:password, name:name });
+    Store.setUsers(list);
+    toast("Teknisi ditambahkan");
+  }
+  nav("technicians");
+}
+function deleteUser(id){
+  const u = Store.user(id);
+  if(!u) return;
+  askConfirm("Hapus akun teknisi " + u.name + "?", function(){
+    Store.setUsers(Store.users().filter(x=>x.id !== id));
+    toast("Akun dihapus");
+    nav("technicians");
+  });
+}
+
+/* ==================== 11. TEKNISI VIEWS ==================== */
+function viewTechInput(){
+  const cust = Store.customers();
+  if(!cust.length) return emptyState("fa-users-slash","Belum ada customer","Admin harus mendaftarkan customer terlebih dahulu.");
+  const opts = cust.map(c=>'<option value="' + c.id + '">' + esc(c.name) + ' — ' + esc(c.plate) + '</option>').join("");
+  return '<div class="max-w-3xl mx-auto space-y-4">' +
+    reminderStripTech() +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<h2 class="text-lg font-black text-slate-800 mb-1"><i class="fa-solid fa-wrench text-indigo-600 mr-2"></i>Input Servis Baru</h2>' +
+      '<p class="text-xs text-slate-500 mb-4">Pilih customer, lalu isi hasil inspeksi Health Check.</p>' +
+      '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">' +
+        field("Pilih Customer", '<select id="ti-cust" onchange="onPickCustomer()" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500"><option value="">— Pilih customer —</option>' + opts + '</select>') +
+        field("Tanggal Servis", '<input type="date" id="ti-date" value="' + todayISO() + '" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500">') +
+        field("Nomor Polisi", '<input type="text" id="ti-plate" readonly class="w-full border border-dashed rounded-xl px-3 py-2.5 bg-slate-50 text-slate-400 uppercase font-bold" value="-">') +
+        field("Nama Pemilik", '<input type="text" id="ti-name" readonly class="w-full border border-dashed rounded-xl px-3 py-2.5 bg-slate-50 text-slate-400" value="-">') +
+        field("Odometer Saat Masuk (KM)", '<input type="number" id="ti-odo" min="1" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="18500">') +
+        field("Catatan Teknisi", '<input type="text" id="ti-note" class="w-full border rounded-xl px-3 py-2.5 outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Opsional">') +
+      '</div>' +
+      '<div id="ti-info" class="hidden mt-4 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-xs text-indigo-800"></div>' +
+    '</div>' +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<div class="flex items-center justify-between mb-3">' +
+        '<h3 class="font-bold text-slate-800 text-sm"><i class="fa-solid fa-list-check text-indigo-600 mr-2"></i>Checklist Health Check (13 Item)</h3>' +
+        '<button onclick="resetChecklist(\'ti\')" class="text-[11px] text-slate-400 hover:text-slate-600">Reset</button>' +
+      '</div>' +
+      '<div class="space-y-2 mb-4">' + checklistHTML("ti", null, "liveTI") + '</div>' +
+      liveScoreHTML("ti") +
+      '<button onclick="saveService()" class="w-full mt-4 bg-slate-900 hover:bg-black text-white font-bold py-3.5 rounded-xl text-sm shadow-lg"><i class="fa-solid fa-floppy-disk mr-2"></i>Simpan Hasil Servis</button>' +
+      '<p class="text-[11px] text-slate-400 text-center mt-2">Skor, risk flag, dan rekomendasi dihitung otomatis dari checklist.</p>' +
+    '</div>' +
+  '</div>';
+}
+function onPickCustomer(){
+  const id = document.getElementById("ti-cust").value;
+  const plate = document.getElementById("ti-plate");
+  const name = document.getElementById("ti-name");
+  const info = document.getElementById("ti-info");
+  const odo = document.getElementById("ti-odo");
+  if(!id){
+    plate.value = "-"; name.value = "-"; info.classList.add("hidden"); odo.value = "";
+    return;
+  }
+  const c = Store.customer(id);
+  if(!c) return;
+  plate.value = c.plate;
+  name.value = c.name;
+  const logs = Store.logsOf(id);
+  const last = logs[0];
+  info.classList.remove("hidden");
+  info.innerHTML = '<i class="fa-solid fa-circle-info mr-1.5"></i> <b>' + esc(c.model) + '</b> · Riwayat servis <b>' + logs.length + 'x</b>' +
+    (last ? ' · Odo terakhir <b>' + fmtNum(last.odo) + ' KM</b> · Index terakhir <b class="' + scoreColor(last.score) + '">' + last.score + '/100</b>' : ' · Belum pernah servis');
+  if(last) odo.value = "";
+  odo.placeholder = last ? "lebih dari " + fmtNum(last.odo) : "contoh: 18500";
+}
+function saveService(){
+  const custId = document.getElementById("ti-cust").value;
+  const date = document.getElementById("ti-date").value;
+  const odo = parseInt(document.getElementById("ti-odo").value, 10);
+  if(!custId) return toast("Pilih customer terlebih dahulu", "error");
+  if(!date) return toast("Tanggal servis wajib diisi", "error");
+  if(!odo || odo <= 0) return toast("Odometer harus lebih besar dari 0", "error");
+  const c = Store.customer(custId);
+  if(!c) return toast("Customer tidak ditemukan", "error");
+  const items = readItems("ti");
+  const r = Engine.compute(items);
+  const u = Store.user(Session.userId) || {};
+  const logs = Store.logs();
+  const log = {
+    id: Store.nextId("L-", logs),
+    customerId: custId,
+    techId: Session.userId,
+    techName: u.name || "Teknisi",
+    date: date,
+    odo: odo,
+    note: document.getElementById("ti-note").value.trim(),
+    items: items,
+    score: r.score,
+    risk: r.risk,
+    status: r.status,
+    criticals: r.criticals,
+    warns: r.warns,
+    recs: r.recs,
+    hasCritical: r.hasCritical,
+    createdAt: new Date().toISOString()
+  };
+  logs.push(log);
+  Store.setLogs(logs);
+  toast("Servis tersimpan · skor " + r.score + "/100");
+  const nextSched = nextServiceDate(log);
+  if(nextSched) toast("Pengingat berikutnya: " + fmtDate(nextSched) + " (H-" + Store.settings().leadDays + ")");
+  nav("passport", log.id);
+}
+function viewTechPassport(id){
+  let log = id ? Store.log(id) : null;
+  if(!log){
+    const mine = Store.logs().filter(l=>l.techId === Session.userId).sort(sortDesc);
+    log = mine[0];
+  }
+  if(!log) return emptyState("fa-id-card-clip","Belum ada passport","Simpan hasil servis terlebih dahulu untuk membuat Service Passport.",
+    '<button onclick="nav(\'input\')" class="bg-indigo-600 text-white text-xs font-bold px-4 py-2 rounded-xl">Input Servis</button>');
+  return passportHTML(log, true);
+}
+function passportHTML(log, withNav){
+  const c = Store.customer(log.customerId);
+  const name = c ? c.name : "Customer (dihapus)";
+  const plate = c ? c.plate : "-";
+  const model = c ? c.model : "-";
+  return '<div class="max-w-3xl mx-auto">' +
+    '<div id="passport-card" class="bg-white p-5 sm:p-6 rounded-2xl shadow-md border border-slate-200 space-y-5">' +
+      '<div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-100 pb-5">' +
+        '<div class="min-w-0">' +
+          '<span class="text-[10px] font-bold text-indigo-600 uppercase tracking-widest">Digital Service Passport</span>' +
+          '<h2 class="text-2xl font-black text-slate-800">' + esc(plate) + '</h2>' +
+          '<p class="text-xs text-slate-500">' + esc(name) + ' · ' + esc(model) + '</p>' +
+          '<p class="text-[11px] text-slate-400">Servis ' + fmtDate(log.date) + ' · ' + fmtNum(log.odo) + ' KM · Teknisi ' + esc(log.techName || "-") + '</p>' +
+        '</div>' +
+        '<div class="flex items-center gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200 flex-none">' +
+          '<div id="passport-qr" data-cid="' + esc(log.customerId) + '" class="bg-white rounded shadow-sm"></div>' +
+          '<div class="text-[10px] text-slate-500 text-left leading-snug">' +
+            '<span class="font-bold text-slate-700 block">QR Login Customer</span>Scan untuk masuk<br>ke aplikasi AJHI' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      (log.hasCritical ?
+        '<div class="bg-rose-50 border-l-4 border-rose-500 p-4 rounded-xl text-rose-800">' +
+          '<div class="flex items-center gap-2 font-bold text-sm"><i class="fa-solid fa-triangle-exclamation text-rose-600"></i> WARNING PRIORITAS KESELAMATAN</div>' +
+          '<p class="text-xs mt-1 text-rose-700 font-medium">Komponen kritis bermasalah: ' + esc(log.criticals.join(", ")) + '. Sangat berisiko bagi keselamatan berkendara!</p>' +
+        '</div>' : '') +
+      '<div class="grid grid-cols-3 gap-3">' +
+        '<div class="bg-slate-50 p-4 rounded-xl text-center border border-slate-100">' +
+          '<span class="text-[10px] text-slate-400 font-bold uppercase">Health Index</span>' +
+          '<div class="text-4xl font-black mt-1 ' + scoreColor(log.score) + '">' + log.score + '<span class="text-base text-slate-400 font-normal">/100</span></div>' +
+        '</div>' +
+        '<div class="bg-slate-50 p-4 rounded-xl text-center border border-slate-100">' +
+          '<span class="text-[10px] text-slate-400 font-bold uppercase">Risk Flag</span>' +
+          '<div class="mt-3"><span class="px-2.5 py-1 rounded-full text-[11px] font-bold ' + riskClass(log.risk) + '">' + esc(log.risk) + '</span></div>' +
+        '</div>' +
+        '<div class="bg-slate-50 p-4 rounded-xl text-center border border-slate-100">' +
+          '<span class="text-[10px] text-slate-400 font-bold uppercase">Status AJHI</span>' +
+          '<div class="text-xs font-bold text-slate-700 mt-3">' + esc(log.status) + '</div>' +
+        '</div>' +
+      '</div>' +
+      (log.note ? '<div class="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-xs text-indigo-800"><b>Catatan teknisi:</b> ' + esc(log.note) + '</div>' : '') +
+      '<div>' +
+        '<h4 class="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">Rekomendasi Tindakan</h4>' +
+        (log.recs && log.recs.length ?
+          '<ul class="space-y-1.5 text-xs text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100 list-disc list-inside">' +
+            log.recs.map(x=>'<li>' + esc(x) + '</li>').join("") + '</ul>'
+          : '<p class="text-xs text-emerald-600 font-semibold bg-emerald-50 p-3 rounded-xl border border-emerald-100">Semua komponen dalam kondisi prima. Tetap lakukan servis rutin berkala!</p>') +
+      '</div>' +
+      '<div class="grid-13-wrap"><div class="grid-13 text-[9px]">' + itemSummaryHTML(log) + '</div></div>' +
+      '<div class="flex flex-col sm:flex-row gap-3 no-print">' +
+        '<button onclick="shareWA(\'' + log.id + '\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-xl flex items-center justify-center gap-2 text-sm shadow-sm">' +
+          '<i class="fa-brands fa-whatsapp text-lg"></i> Kirim ke WhatsApp</button>' +
+        '<button onclick="copyReport(\'' + log.id + '\')" class="bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold py-3 px-4 rounded-xl text-sm whitespace-nowrap"><i class="fa-solid fa-copy mr-1.5"></i>Salin Laporan</button>' +
+        '<button onclick="printEl(document.getElementById(\'passport-card\'))" class="bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold py-3 px-5 rounded-xl text-sm"><i class="fa-solid fa-print mr-2"></i>Cetak Passport</button>' +
+        (withNav && Session.role === "teknisi" ? '<button onclick="nav(\'input\')" class="bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 px-5 rounded-xl text-sm"><i class="fa-solid fa-plus mr-2"></i>Servis Baru</button>' : '') +
+      '</div>' +
+    '</div>' +
+  '</div>';
+}
+function renderPassportQRs(){
+  document.querySelectorAll("#passport-qr").forEach(function(el){
+    if(el.getAttribute("data-rendered")) return;
+    const c = Store.customer(el.getAttribute("data-cid"));
+    if(!c) return;
+    QRService.render(el, c.token, 72);
+    el.setAttribute("data-rendered", "1");
+  });
+}
+function itemSummaryHTML(log){
+  return CHECKLIST.map(it=>{
+    const v = parseFloat(log.items[it.id]);
+    let bg = "bg-emerald-100 text-emerald-700", tag = "OK";
+    if(v === 0){ bg = "bg-rose-100 text-rose-700"; tag = "RUSAK"; }
+    else if(v === 0.5){ bg = "bg-amber-100 text-amber-700"; tag = "AWAS"; }
+    return '<div class="rounded-lg px-1 py-1.5 text-center ' + bg + '" title="' + esc(it.name) + '">' +
+      '<div class="font-black leading-none">' + esc(it.id.replace("ITM-","")) + '</div>' +
+      '<div class="text-[8px] font-bold uppercase">' + tag + '</div></div>';
+  }).join("");
+}
+function buildWAText(logId){
+  const l = Store.log(logId);
+  if(!l) return "";
+  const c = Store.customer(l.customerId);
+  if(!c) return "";
+  const lines = [
+    "*AUTO JATS HEALTH INDEX*",
+    "-------------------------------------",
+    "*Pemilik:* " + c.name,
+    "*No. Polisi:* " + c.plate,
+    "*Tanggal:* " + fmtDate(l.date),
+    "*Odometer:* " + fmtNum(l.odo) + " KM",
+    "*Health Index:* " + l.score + "/100",
+    "*Status:* " + l.status,
+    "*Risk Flag:* " + stripEmoji(l.risk)
+  ];
+  if(l.hasCritical) lines.push("", "*WARNING KESELAMATAN:* " + l.criticals.join(", "));
+  lines.push("", "*Rekomendasi:*");
+  (l.recs || []).slice(0,4).forEach(r=>lines.push("- " + r));
+  lines.push("-------------------------------------", "_Terima kasih telah servis di Auto Jats Service_");
+  return lines.join("\n");
+}
+function custWAText(c){
+  if(!c) return "";
+  const logs = Store.logsOf(c.id);
+  if(logs.length) return buildWAText(logs[0].id);
+  return [
+    "*AUTO JATS HEALTH INDEX*",
+    "-------------------------------------",
+    "*Pemilik:* " + c.name,
+    "*No. Polisi:* " + c.plate,
+    "*Motor:* " + c.model,
+    "-------------------------------------",
+    "_Terima kasih telah mendaftar di Auto Jats Service. Sampai jumpa saat servis!_"
+  ].join("\n");
+}
+function custWAUrl(c){
+  const num = normalizeWA(c ? c.wa : "");
+  if(!num) return "";
+  return "https://wa.me/" + num + "?text=" + encodeURIComponent(custWAText(c));
+}
+function shareWA(logId){
+  const l = Store.log(logId);
+  if(!l) return;
+  const c = Store.customer(l.customerId);
+  if(!c) return toast("Customer tidak ditemukan", "error");
+  openWA(c.wa, buildWAText(logId));
+}
+function copyReport(logId){
+  const text = buildWAText(logId);
+  if(!text) return;
+  const done = function(){ toast("Laporan disalin. Tinggal tempel di chat WhatsApp."); };
+  const fallback = function(){
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try{ document.execCommand("copy"); done(); }
+    catch(e){ toast("Gagal menyalin otomatis. Silakan pilih teks manual.", "error"); }
+    ta.remove();
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  }else fallback();
+}
+function viewTechMyLogs(){
+  const mine = Store.logs().filter(l=>l.techId === Session.userId).sort(sortDesc);
+  return '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+    '<div class="flex items-center justify-between mb-4 flex-wrap gap-3">' +
+      '<div><h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-clock-rotate-left text-indigo-600 mr-2"></i>Log Saya</h2>' +
+      '<p class="text-xs text-slate-500">' + mine.length + ' servis yang Anda input</p></div>' +
+      '<button onclick="nav(\'input\')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl"><i class="fa-solid fa-plus mr-1.5"></i>Servis Baru</button>' +
+    '</div>' +
+    (mine.length ? mine.map(l=>{
+      const c = Store.customer(l.customerId);
+      return '<div class="border border-slate-200 rounded-xl p-4 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50">' +
+        '<div class="min-w-0">' +
+          '<div class="flex items-center gap-2 flex-wrap"><b class="text-slate-800">' + esc(c ? c.plate : "-") + '</b>' +
+          '<span class="text-xs text-slate-500">' + esc(c ? c.name : "dihapus") + '</span></div>' +
+          '<div class="text-[11px] text-slate-400 mt-0.5">' + fmtDate(l.date) + ' · ' + fmtNum(l.odo) + ' KM' + (l.note ? ' · ' + esc(l.note) : '') + '</div>' +
+        '</div>' +
+        '<div class="flex items-center gap-3 flex-none">' +
+          '<span class="text-xl font-black ' + scoreColor(l.score) + '">' + l.score + '</span>' +
+          '<span class="px-2 py-1 rounded-full text-[10px] font-bold ' + riskClass(l.risk) + '">' + esc(l.risk) + '</span>' +
+          '<button onclick="nav(\'passport\',\'' + l.id + '\')" class="bg-indigo-50 text-indigo-600 hover:bg-indigo-100 text-xs font-bold px-3 py-2 rounded-lg">Passport</button>' +
+        '</div>' +
+      '</div>';
+    }).join("") : emptyState("fa-inbox","Belum ada log","Anda belum menginput servis apa pun.")) +
+  '</div>';
+}
+
+/* ==================== 12. CUSTOMER VIEWS ==================== */
+function myCustomer(){
+  return Session && Session.customerId ? Store.customer(Session.customerId) : null;
+}
+function viewCustomerHome(){
+  const c = myCustomer();
+  if(!c) return emptyState("fa-user-slash","Sesi berakhir","Silakan login ulang dengan QR Anda.");
+  const logs = Store.logsOf(c.id);
+  const last = logs[0];
+  const profile = '<div class="bg-gradient-to-br from-indigo-900 to-indigo-800 text-white p-5 rounded-2xl shadow-lg relative overflow-hidden">' +
+      '<div class="absolute -right-6 -top-6 text-indigo-700/40 text-8xl"><i class="fa-solid fa-motorcycle"></i></div>' +
+      '<span class="text-[10px] uppercase tracking-widest text-amber-400 font-bold">Kendaraan Saya</span>' +
+      '<h2 class="text-2xl font-black mt-1">' + esc(c.plate) + '</h2>' +
+      '<p class="text-sm text-indigo-200">' + esc(c.model) + '</p>' +
+      '<div class="grid grid-cols-2 gap-3 mt-4 text-xs">' +
+        '<div class="bg-white/10 rounded-xl px-3 py-2"><div class="text-indigo-300 text-[10px] uppercase">Pemilik</div><b>' + esc(c.name) + '</b></div>' +
+        '<div class="bg-white/10 rounded-xl px-3 py-2"><div class="text-indigo-300 text-[10px] uppercase">Odo Terakhir</div><b>' + (last ? fmtNum(last.odo) + " KM" : "—") + '</b></div>' +
+      '</div>' +
+    '</div>';
+  if(!last){
+    return '<div class="space-y-4">' + profile +
+      emptyState("fa-clipboard","Belum ada riwayat servis","Motor Anda belum pernah diperiksa di Auto Jats Service. Servis rutin diperlukan agar Health Index tetap terjaga.") +
+    '</div>';
+  }
+  const trend = logs.slice(0,8).reverse();
+  return '<div class="space-y-4">' +
+    reminderBannerCustomer() +
+    profile +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<div class="flex items-start justify-between gap-4">' +
+        '<div>' +
+          '<span class="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Health Index Terakhir</span>' +
+          '<div class="text-5xl font-black mt-1 ' + scoreColor(last.score) + '">' + last.score + '<span class="text-lg text-slate-400 font-normal">/100</span></div>' +
+          '<p class="text-xs text-slate-500 mt-1">Servis ' + fmtDate(last.date) + '</p>' +
+        '</div>' +
+        '<div class="text-right space-y-2">' +
+          '<span class="inline-block px-3 py-1.5 rounded-full text-xs font-bold ' + riskClass(last.risk) + '">' + esc(last.risk) + '</span>' +
+          '<div class="text-[11px] font-semibold text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">' + esc(last.status) + '</div>' +
+        '</div>' +
+      '</div>' +
+      (last.hasCritical ?
+        '<div class="mt-4 bg-rose-50 border-l-4 border-rose-500 p-3 rounded-xl text-rose-800 text-xs font-medium">' +
+          '<b class="block mb-0.5"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Perlu perbaikan segera:</b>' + esc(last.criticals.join(", ")) +
+        '</div>' : '') +
+      '<div class="mt-4 grid grid-cols-3 gap-3 text-center">' +
+        '<div class="bg-slate-50 rounded-xl py-3 border border-slate-100"><div class="text-xl font-black text-slate-800">' + logs.length + '</div><div class="text-[9px] uppercase text-slate-400 font-bold">Total Servis</div></div>' +
+        '<div class="bg-slate-50 rounded-xl py-3 border border-slate-100"><div class="text-xl font-black text-slate-800">' + Math.max.apply(null, logs.map(l=>l.score)) + '</div><div class="text-[9px] uppercase text-slate-400 font-bold">Skor Tertinggi</div></div>' +
+        '<div class="bg-slate-50 rounded-xl py-3 border border-slate-100"><div class="text-xl font-black text-slate-800">' + logs.filter(l=>l.hasCritical).length + '</div><div class="text-[9px] uppercase text-slate-400 font-bold">Servis Kritis</div></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+      '<div class="flex items-center justify-between mb-4">' +
+        '<h3 class="font-bold text-slate-800 text-sm"><i class="fa-solid fa-chart-column text-indigo-600 mr-2"></i>Tren Health Index</h3>' +
+        '<button onclick="nav(\'history\')" class="text-xs text-indigo-600 font-semibold hover:underline">Riwayat lengkap</button>' +
+      '</div>' +
+      '<div class="flex items-end justify-between gap-2 h-40 px-1">' +
+        trend.map(l=>{
+          const h = Math.max(8, Math.round((l.score/100)*96));
+          const color = l.score >= 85 ? "bg-emerald-500" : (l.score >= 75 ? "bg-amber-400" : "bg-rose-500");
+          return '<div class="flex-1 flex flex-col items-center justify-end gap-1 min-w-0 h-full">' +
+            '<span class="text-[10px] font-black ' + scoreColor(l.score) + '">' + l.score + '</span>' +
+            '<div class="' + color + ' w-full max-w-[72px] mx-auto rounded-t-md shadow-sm" style="height:' + h + 'px"></div>' +
+            '<span class="text-[8px] text-slate-400 truncate w-full text-center">' + fmtDate(l.date).split(" ")[0] + ' ' + fmtDate(l.date).split(" ")[1] + '</span>' +
+          '</div>';
+        }).join("") +
+      '</div>' +
+    '</div>' +
+    (last.recs && last.recs.length ?
+      '<div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">' +
+        '<h3 class="font-bold text-slate-800 text-sm mb-3"><i class="fa-solid fa-clipboard-check text-indigo-600 mr-2"></i>Rekomendasi Terakhir</h3>' +
+        '<ul class="space-y-1.5 text-xs text-slate-600 list-disc list-inside bg-slate-50 p-3 rounded-xl border border-slate-100">' +
+          last.recs.map(r=>'<li>' + esc(r) + '</li>').join("") + '</ul>' +
+      '</div>' : '') +
+  '</div>';
+}
+function viewCustomerHistory(){
+  const c = myCustomer();
+  if(!c) return emptyState("fa-user-slash","Sesi berakhir","Silakan login ulang dengan QR Anda.");
+  const logs = Store.logsOf(c.id);
+  if(!logs.length) return emptyState("fa-book-open","Riwayat masih kosong","Belum ada servis tercatat untuk kendaraan Anda.");
+  return '<div class="space-y-3">' +
+    '<div class="flex items-center justify-between flex-wrap gap-3">' +
+      '<div><h2 class="text-lg font-black text-slate-800"><i class="fa-solid fa-book-open text-indigo-600 mr-2"></i>Riwayat Servis</h2>' +
+      '<p class="text-xs text-slate-500">' + logs.length + ' servis tercatat untuk ' + esc(c.plate) + '</p></div>' +
+      '<button onclick="shareWA(\'' + logs[0].id + '\')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl"><i class="fa-brands fa-whatsapp mr-1.5"></i>Ringkasan Terbaru</button>' +
+    '</div>' +
+    logs.map((l,i)=>{
+      const items = CHECKLIST.filter(it=>parseFloat(l.items[it.id]) < 1);
+      return '<div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">' +
+        '<button onclick="toggleAcc(\'acc-' + l.id + '\')" class="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-slate-50">' +
+          '<div class="flex items-center gap-3 min-w-0">' +
+            '<div class="w-11 h-11 rounded-xl flex flex-col items-center justify-center flex-none ' + (l.score >= 85 ? "bg-emerald-50 text-emerald-600" : (l.score >= 75 ? "bg-amber-50 text-amber-600" : "bg-rose-50 text-rose-600")) + '">' +
+              '<span class="text-sm font-black leading-none">' + l.score + '</span><span class="text-[8px] leading-none">/100</span>' +
+            '</div>' +
+            '<div class="min-w-0">' +
+              '<div class="font-bold text-slate-800 text-sm">' + fmtDate(l.date) + (i === 0 ? ' <span class="text-[9px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded ml-1 align-middle">TERBARU</span>' : '') + '</div>' +
+              '<div class="text-[11px] text-slate-500">' + fmtNum(l.odo) + ' KM · ' + esc(l.techName || "Teknisi") + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="flex items-center gap-2 flex-none">' +
+            '<span class="hidden sm:inline px-2 py-1 rounded-full text-[9px] font-bold ' + riskClass(l.risk) + '">' + esc(l.risk) + '</span>' +
+            '<i id="acc-icon-' + l.id + '" class="fa-solid fa-chevron-down text-slate-400 text-xs transition-transform"></i>' +
+          '</div>' +
+        '</button>' +
+        '<div id="acc-' + l.id + '" class="accordion-body">' +
+          '<div class="px-4 pb-4 pt-1 border-t border-slate-100 space-y-3">' +
+            '<div class="flex flex-wrap items-center gap-2 text-[11px]">' +
+              '<span class="px-2 py-1 rounded-full font-bold ' + riskClass(l.risk) + '">' + esc(l.risk) + '</span>' +
+              '<span class="bg-slate-100 text-slate-600 px-2 py-1 rounded-full font-semibold">' + esc(l.status) + '</span>' +
+              '<span class="bg-slate-100 text-slate-500 px-2 py-1 rounded-full">' + esc(l.date) + '</span>' +
+            '</div>' +
+            (l.note ? '<div class="bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2 text-[11px] text-indigo-800"><b>Catatan teknisi:</b> ' + esc(l.note) + '</div>' : '') +
+            (l.hasCritical ?
+              '<div class="bg-rose-50 border-l-4 border-rose-500 rounded-r-xl px-3 py-2 text-[11px] text-rose-800 font-medium">' +
+                '<b>Item kritis:</b> ' + esc(l.criticals.join(", ")) + '</div>' : '') +
+            (items.length ?
+              '<div>' +
+                '<div class="text-[10px] uppercase font-bold text-slate-400 mb-1.5">Kondisi Komponen</div>' +
+                '<div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">' +
+                  items.map(it=>{
+                    const v = parseFloat(l.items[it.id]);
+                    const cls = v === 0 ? "bg-rose-50 text-rose-700 border-rose-100" : "bg-amber-50 text-amber-700 border-amber-100";
+                    return '<div class="flex items-center justify-between gap-2 border ' + cls + ' rounded-lg px-2.5 py-1.5 text-[11px]">' +
+                      '<span class="font-semibold truncate">' + esc(it.name) + '</span>' +
+                      '<b class="flex-none">' + (v === 0 ? "🔴 Rusak" : "🟡 Perhatian") + '</b></div>';
+                  }).join("") +
+                '</div>' +
+              '</div>' : '<p class="text-[11px] text-emerald-600 font-semibold">Semua komponen dalam kondisi normal.</p>') +
+            (l.recs && l.recs.length ?
+              '<div>' +
+                '<div class="text-[10px] uppercase font-bold text-slate-400 mb-1.5">Rekomendasi</div>' +
+                '<ul class="space-y-1 text-[11px] text-slate-600 list-disc list-inside bg-slate-50 p-3 rounded-xl">' +
+                  l.recs.map(r=>'<li>' + esc(r) + '</li>').join("") + '</ul>' +
+              '</div>' : '') +
+            '<div class="grid-13-wrap"><div class="grid-13 text-[9px]">' + itemSummaryHTML(l) + '</div></div>' +
+            '<div class="flex gap-2 pt-1">' +
+              '<button onclick="shareWA(\'' + l.id + '\')" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold py-2.5 rounded-xl"><i class="fa-brands fa-whatsapp mr-1.5"></i>Bagikan</button>' +
+              '<button onclick="showPassportModal(\'' + l.id + '\')" class="flex-1 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold py-2.5 rounded-xl"><i class="fa-solid fa-id-card mr-1.5"></i>Passport</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join("") +
+  '</div>';
+}
+function toggleAcc(id){
+  const body = document.getElementById(id);
+  const icon = document.getElementById("acc-icon-" + id.replace("acc-",""));
+  const open = body.classList.toggle("open");
+  if(icon) icon.style.transform = open ? "rotate(180deg)" : "";
+}
+function showPassportModal(id){
+  const l = Store.log(id);
+  if(!l) return;
+  openModal('<div id="passport-modal-inner">' + passportHTML(l, false) + '</div>', { size:"lg" });
+  renderPassportQRs();
+}
+
+/* ==================== 13. SCAN ==================== */
+let camStream = null, camRaf = null;
+function openScan(){
+  document.getElementById("login-screen").classList.add("hidden");
+  document.getElementById("scan-screen").classList.remove("hidden");
+  document.getElementById("scan-msg").classList.add("hidden");
+  document.getElementById("manual-token").classList.add("hidden");
+}
+function closeScan(){
+  stopCamera();
+  document.getElementById("scan-screen").classList.add("hidden");
+  if(!Session) document.getElementById("login-screen").classList.remove("hidden");
+}
+function showManualToken(){
+  document.getElementById("manual-token").classList.toggle("hidden");
+  document.getElementById("token-input").focus();
+}
+function scanMsg(text){
+  const el = document.getElementById("scan-msg");
+  el.textContent = text;
+  el.classList.remove("hidden");
+}
+async function startCamera(){
+  const video = document.getElementById("scan-video");
+  try{
+    camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:"environment" } } });
+    video.srcObject = camStream;
+    video.classList.remove("hidden");
+    document.getElementById("scan-placeholder").classList.add("hidden");
+    await video.play();
+    document.getElementById("btn-cam").textContent = "Kamera Aktif";
+    scanLoop();
+  }catch(e){
+    scanMsg("Kamera tidak dapat diakses. Gunakan pilih gambar QR atau token manual.");
+  }
+}
+function stopCamera(){
+  if(camRaf) cancelAnimationFrame(camRaf);
+  camRaf = null;
+  if(camStream){
+    camStream.getTracks().forEach(t=>t.stop());
+    camStream = null;
+  }
+  const video = document.getElementById("scan-video");
+  video.srcObject = null;
+  video.classList.add("hidden");
+  const ph = document.getElementById("scan-placeholder");
+  if(ph) ph.classList.remove("hidden");
+  const btn = document.getElementById("btn-cam");
+  if(btn) btn.innerHTML = '<i class="fa-solid fa-video mr-2"></i> Aktifkan Kamera';
+}
+function scanLoop(){
+  const video = document.getElementById("scan-video");
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently:true });
+  const tick = function(){
+    if(!camStream || video.readyState !== video.HAVE_ENOUGH_DATA){ camRaf = requestAnimationFrame(tick); return; }
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = window.jsQR ? jsQR(img.data, img.width, img.height, { inversionAttempts:"dontInvert" }) : null;
+    if(code && code.data){
+      stopCamera();
+      handleScanResult(code.data);
+      return;
+    }
+    camRaf = requestAnimationFrame(tick);
+  };
+  camRaf = requestAnimationFrame(tick);
+}
+function scanFromFile(e){
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = function(){
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d").drawImage(img, 0, 0);
+    const data = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
+    const code = window.jsQR ? jsQR(data.data, data.width, data.height, { inversionAttempts:"attemptBoth" }) : null;
+    URL.revokeObjectURL(url);
+    if(code && code.data) handleScanResult(code.data);
+    else scanMsg("QR tidak terbaca dari gambar. Coba gambar lain yang lebih jelas.");
+  };
+  img.onerror = function(){ scanMsg("Gagal membaca gambar."); };
+  img.src = url;
+  e.target.value = "";
+}
+function handleScanResult(text){
+  const m = String(text).match(/scan=([A-Za-z0-9]+)/);
+  const token = m ? m[1] : String(text).trim();
+  tryLoginToken(token);
+}
+function loginManualToken(){
+  const v = document.getElementById("token-input").value.trim();
+  if(!v) return scanMsg("Masukkan token terlebih dahulu.");
+  tryLoginToken(v);
+}
+function tryLoginToken(token){
+  const c = Auth.loginByToken(token);
+  if(c){
+    stopCamera();
+    document.getElementById("scan-screen").classList.add("hidden");
+    document.getElementById("invalid-screen").classList.add("hidden");
+    toast("Selamat datang, " + c.name);
+    enterApp();
+  }else{
+    stopCamera();
+    document.getElementById("scan-screen").classList.add("hidden");
+    document.getElementById("invalid-screen").classList.remove("hidden");
+  }
+}
+function dismissInvalid(){
+  document.getElementById("invalid-screen").classList.add("hidden");
+  try{ history.replaceState(null,"",location.pathname+location.search); }catch(e){}
+  if(!Session) document.getElementById("login-screen").classList.remove("hidden");
+}
+
+/* ==================== 14. LOGIN / LOGOUT ==================== */
+let pendingRole = null;
+function showStaffLogin(role){
+  pendingRole = role;
+  document.getElementById("login-menu").classList.add("hidden");
+  document.getElementById("staff-login-form").classList.remove("hidden");
+  document.getElementById("staff-role-label").textContent = role === "admin" ? "Admin" : "Teknisi";
+  document.getElementById("login-error").classList.add("hidden");
+  document.getElementById("login-username").value = "";
+  document.getElementById("login-password").value = "";
+  document.getElementById("login-username").focus();
+}
+function backToLoginMenu(){
+  document.getElementById("staff-login-form").classList.add("hidden");
+  document.getElementById("login-menu").classList.remove("hidden");
+}
+document.getElementById("staff-login-form").addEventListener("submit", function(e){
+  e.preventDefault();
+  const u = document.getElementById("login-username").value;
+  const p = document.getElementById("login-password").value;
+  const err = document.getElementById("login-error");
+  if(!u || !p){
+    err.textContent = "Username dan password wajib diisi.";
+    err.classList.remove("hidden");
+    return;
+  }
+  const user = Auth.loginStaff(pendingRole, u, p);
+  if(!user){
+    err.textContent = "Username atau password salah.";
+    err.classList.remove("hidden");
+    return;
+  }
+  err.classList.add("hidden");
+  toast("Selamat datang, " + user.name);
+  backToLoginMenu();
+  enterApp();
+});
+function showLogin(){
+  document.getElementById("main-header").classList.add("hidden");
+  document.getElementById("main-content").classList.add("hidden");
+  document.getElementById("login-screen").classList.remove("hidden");
+  backToLoginMenu();
+}
+function enterApp(){
+  document.getElementById("login-screen").classList.add("hidden");
+  document.getElementById("scan-screen").classList.add("hidden");
+  document.getElementById("invalid-screen").classList.add("hidden");
+  document.getElementById("main-header").classList.remove("hidden");
+  document.getElementById("main-content").classList.remove("hidden");
+  const badge = document.getElementById("role-badge");
+  if(Session.role === "admin"){
+    badge.textContent = "Admin";
+    badge.className = "px-2.5 py-1 text-[10px] sm:text-xs font-bold rounded-full bg-indigo-600 text-white whitespace-nowrap";
+  }else if(Session.role === "teknisi"){
+    badge.textContent = "Teknisi";
+    badge.className = "px-2.5 py-1 text-[10px] sm:text-xs font-bold rounded-full bg-slate-700 text-white whitespace-nowrap";
+  }else{
+    const c = myCustomer();
+    badge.textContent = c ? c.plate : "Customer";
+    badge.className = "px-2.5 py-1 text-[10px] sm:text-xs font-bold rounded-full bg-emerald-500 text-white whitespace-nowrap";
+  }
+  nav(DEFAULT_VIEW[Session.role]);
+}
+function logout(){
+  Auth.logout();
+  stopCamera();
+  toast("Anda telah keluar");
+  showLogin();
+}
+
+/* ==================== 15. SEED & INIT ==================== */
+function seed(){
+  const users = [
+    { id:"U-001", role:"admin", username:"admin", password:"admin123", name:"Admin Auto Jats" },
+    { id:"U-002", role:"teknisi", username:"teknisi", password:"teknisi123", name:"Andi Wijaya" },
+    { id:"U-003", role:"teknisi", username:"teknisi2", password:"teknisi123", name:"Rizky Pratama" }
+  ];
+  const customers = [
+    { id:"C-001", token:"KT3MTR7X9A", name:"Budi Santoso", wa:"6281234567890", plate:"KT 1234 ABC", model:"Honda Vario 125", createdAt:"2026-06-10T08:00:00.000Z" },
+    { id:"C-002", token:"NMAXQ2PL8B", name:"Siti Aminah", wa:"6289876543210", plate:"KT 5678 DEF", model:"Yamaha NMAX 155", createdAt:"2026-07-02T08:00:00.000Z" },
+    { id:"C-003", token:"SATRIA5KM7", name:"Rudi Hartono", wa:"6281112223334", plate:"KT 9012 GHI", model:"Suzuki Satria F150", createdAt:"2026-08-15T08:00:00.000Z" }
+  ];
+  const mk = function(items){
+    const o = {};
+    CHECKLIST.forEach(i=>{ o[i.id] = 1; });
+    Object.keys(items).forEach(k=>{ o[k] = items[k]; });
+    return o;
+  };
+  const rawLogs = [
+    { customerId:"C-001", techId:"U-002", techName:"Andi Wijaya", date:"2026-06-12", odo:12000, note:"Servis rutin 12.000 KM",
+      items: mk({ "ITM-001":0.5 }), createdAt:"2026-06-12T09:15:00.000Z" },
+    { customerId:"C-001", techId:"U-002", techName:"Andi Wijaya", date:"2026-08-20", odo:15200, note:"Ganti oli & setel rantai",
+      items: mk({ "ITM-001":0.5, "ITM-007":0.5, "ITM-002":0.5 }), createdAt:"2026-08-20T10:30:00.000Z" },
+    { customerId:"C-001", techId:"U-003", techName:"Rizky Pratama", date:"2026-10-05", odo:18500, note:"Lampu rem mati, diganti saklar",
+      items: mk({ "ITM-001":0.5, "ITM-011":0, "ITM-012":0.5, "ITM-013":0.5 }), createdAt:"2026-10-05T14:00:00.000Z" },
+    { customerId:"C-002", techId:"U-002", techName:"Andi Wijaya", date:"2026-09-11", odo:9400, note:"Ban depan mulai tipis",
+      items: mk({ "ITM-004":0.5, "ITM-007":0.5 }), createdAt:"2026-09-11T11:20:00.000Z" },
+    { customerId:"C-003", techId:"U-003", techName:"Rizky Pratama", date:"2026-09-28", odo:22100, note:"Rem depan blong, kampas diganti",
+      items: mk({ "ITM-008":0, "ITM-010":0.5, "ITM-001":0.5 }), createdAt:"2026-09-28T13:45:00.000Z" }
+  ];
+  const logs = rawLogs.map(function(l, i){
+    const r = Engine.compute(l.items);
+    return Object.assign({}, l, {
+      id: "L-" + String(i+1).padStart(3,"0"),
+      score: r.score, risk: r.risk, status: r.status,
+      criticals: r.criticals, warns: r.warns, recs: r.recs, hasCritical: r.hasCritical
+    });
+  });
+  Store.setUsers(users);
+  Store.setCustomers(customers);
+  Store.setLogs(logs);
+}
+function init(){
+  if(!Store.raw(KEY.USERS, null)) seed();
+  Auth.restore();
+  window._custQuery = ""; window._logQuery = ""; window._logCust = "";
+  const hashMatch = location.hash.match(/scan=([A-Za-z0-9]+)/);
+  if(hashMatch){
+    tryLoginToken(hashMatch[1]);
+    return;
+  }
+  if(Session) enterApp();
+  else showLogin();
+}
+window.addEventListener("hashchange", function(){
+  const m = location.hash.match(/scan=([A-Za-z0-9]+)/);
+  if(m) tryLoginToken(m[1]);
+});
+window.addEventListener("load", init);
